@@ -1,0 +1,8 @@
+# IEC103 Python Test Slave Dependencies
+# Python 3.7+ required (asyncio, dataclasses built-in)
+
+# No external dependencies required for basic functionality
+# The implementation uses only Python standard library
+
+# Optional: For dataclass type hints in older Python versions
+# dataclasses>=0.6  # Only needed for Python < 3.7
