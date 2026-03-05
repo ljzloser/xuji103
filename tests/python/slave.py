@@ -6,6 +6,7 @@
 import asyncio
 import argparse
 import logging
+import struct
 from typing import Optional
 
 import sys
@@ -62,6 +63,11 @@ class IEC103Slave:
         self.connected = True
         self.reset()
         
+        # 启动突发上送任务
+        spontaneous_task = asyncio.create_task(
+            self.spontaneous_loop(writer)
+        )
+        
         try:
             while self.connected:
                 data = await reader.read(4096)
@@ -74,11 +80,30 @@ class IEC103Slave:
             logger.error(f"连接错误: {e}")
         finally:
             self.connected = False
+            spontaneous_task.cancel()
             writer.close()
             try:
                 await writer.wait_closed()
             except:
                 pass
+    
+    async def spontaneous_loop(self, writer: asyncio.StreamWriter):
+        """定时发送突发事件的循环"""
+        import struct
+        event_count = 0
+        try:
+            while self.connected:
+                await asyncio.sleep(10)  # 每10秒发送一次
+                if self.started and self.connected:
+                    event_count += 1
+                    if event_count % 2 == 0:
+                        # 发送ASDU1突发遥信
+                        await self.send_spontaneous_event(writer)
+                    else:
+                        # 发送ASDU2保护动作事件
+                        await self.send_protection_event(writer)
+        except asyncio.CancelledError:
+            pass
     
     async def process_data(self, data: bytes, writer: asyncio.StreamWriter):
         """处理接收数据"""
@@ -121,7 +146,7 @@ class IEC103Slave:
             await writer.drain()
         
         elif u_type == 0x43:  # TESTFR_ACT
-            logger.debug("收到TESTFR测试帧")
+            logger.info("收到TESTFR测试帧")
             # 响应TESTFR_CON
             response = FrameCodec.encode_u_format(0x83)
             writer.write(response)
@@ -309,6 +334,59 @@ class IEC103Slave:
             ack = FrameCodec.encode_s_format(self.recv_seq)
             writer.write(ack)
             await writer.drain()
+    
+    async def send_spontaneous_event(self, writer: asyncio.StreamWriter):
+        """发送突发遥信事件 (ASDU1)"""
+        if not self.started or not self.connected:
+            return
+        
+        # 随机选择一个遥信点发送
+        import random
+        points = self.digital_gen.get_gi_points()
+        if points:
+            point = random.choice(points)
+            # 翻转状态
+            point.value = not point.value
+            
+            # 构建ASDU1
+            asdu = ASDUBuilder.build_single_point(
+                self.device_addr,
+                point.fun,
+                point.inf,
+                2 if point.value else 1,  # DPI: 1=OFF, 2=ON
+                cot=COT.SPONTANEOUS
+            )
+            frame = self.build_i_frame(asdu)
+            writer.write(frame)
+            await writer.drain()
+            
+            logger.info(f"突发遥信 (ASDU1): FUN={point.fun:02X} INF={point.inf:02X} DPI={2 if point.value else 1}")
+    
+    async def send_protection_event(self, writer: asyncio.StreamWriter):
+        """发送保护动作事件 (ASDU2)"""
+        if not self.started or not self.connected:
+            return
+        
+        # 构建ASDU2 - 保护动作事件
+        data = bytearray()
+        data.append(0x80)  # FUN = 距离保护
+        data.append(0x01)  # INF = 保护动作
+        data.append(0x02)  # DPI = ON (动作)
+        data.extend(struct.pack('<H', 100))  # RET = 相对时间 100ms
+        data.extend(struct.pack('<H', 1))    # FAN = 故障序号 1
+        # 时标1 (实际发生时间)
+        data.extend(CP56Time2a.now().encode())
+        # 时标2 (子站接收时间)
+        data.extend(CP56Time2a.now().encode())
+        # SIN (故障相别)
+        data.append(0x89)  # A相接地故障
+        
+        asdu = ASDU(TI.DOUBLE_POINT_TIME, 1, COT.SPONTANEOUS, 0, self.device_addr, bytes(data))
+        frame = self.build_i_frame(asdu)
+        writer.write(frame)
+        await writer.drain()
+        
+        logger.info(f"保护动作事件 (ASDU2): FUN=80 INF=01 DPI=02 FAN=1")
 
 
 async def main():

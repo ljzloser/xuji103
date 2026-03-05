@@ -10,6 +10,7 @@
 #include "iec103/types/Constants.h"
 #include "utils/Logger.h"
 #include <QDebug>
+#include <QThread>
 
 namespace IEC103 {
 
@@ -64,6 +65,14 @@ void IEC103Master::disconnectFromServer()
     stopTestTimer();
     stopAckTimer();
     m_giTimer->stop();
+    
+    // 发送STOPDT命令后再断开连接
+    if (m_startDtReceived && m_transport->isConnected()) {
+        Logger::info("Sending STOPDT before disconnect");
+        Frame stopDt = FrameCodec::createUFrame(UControl::StopDtAct);
+        sendFrame(stopDt);
+    }
+    
     m_transport->disconnectFromServer();
 }
 bool IEC103Master::isConnected() const

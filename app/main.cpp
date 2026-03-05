@@ -2,6 +2,7 @@
 #include <QCommandLineParser>
 #include <QTimer>
 #include <QDebug>
+#include <csignal>
 #include "Config.h"
 #include "DataPrinter.h"
 #include "iec103/IEC103Master.h"
@@ -23,6 +24,10 @@ public:
         connect(m_master, &IEC103Master::disconnected, this, &Application::onDisconnected);
         connect(m_master, &IEC103Master::errorOccurred, this, &Application::onError);
         connect(m_master, &IEC103Master::giFinished, this, &Application::onGIFinished);
+        
+        // 设置Unix信号处理
+        signal(SIGINT, &Application::handleSignal);
+        signal(SIGTERM, &Application::handleSignal);
     }
 
     bool init(const QStringList& args) {
@@ -81,9 +86,13 @@ private slots:
         // 召唤遥脉数据
         readCounterGroups(deviceAddr);
         
-        // 如果只执行一次GI，则退出
+        // 如果只执行一次GI，则断开连接并退出
         if (Config::instance().giInterval() == 0) {
-            QTimer::singleShot(2000, []() {
+            QTimer::singleShot(2000, [this]() {
+                qInfo() << "Disconnecting...";
+                m_master->disconnectFromServer();
+            });
+            QTimer::singleShot(3000, []() {
                 QCoreApplication::quit();
             });
         }
@@ -104,11 +113,26 @@ private slots:
             m_master->readGenericGroup(deviceAddr, group);
         }
     }
+    
+    static void handleSignal(int signal) {
+        qInfo() << "Received signal" << signal << ", disconnecting...";
+        if (s_instance) {
+            s_instance->m_master->disconnectFromServer();
+            QTimer::singleShot(500, []() {
+                QCoreApplication::quit();
+            });
+        }
+    }
 
 private:
     IEC103Master* m_master;
     DataPrinter* m_printer;
+    
+public:
+    static Application* s_instance;
 };
+
+Application* Application::s_instance = nullptr;
 
 int main(int argc, char* argv[])
 {
@@ -117,6 +141,8 @@ int main(int argc, char* argv[])
     QCoreApplication::setApplicationVersion("1.0.0");
 
     Application application;
+    Application::s_instance = &application;
+    
     if (!application.init(app.arguments())) {
         return 1;
     }
