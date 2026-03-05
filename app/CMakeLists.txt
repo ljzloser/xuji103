@@ -15,7 +15,7 @@ add_executable(xuji103 ${APP_SOURCES} ${APP_HEADERS})
 
 target_link_libraries(xuji103
     PRIVATE
-        iec103
+        xuji_iec103
         Qt5::Core
 )
 

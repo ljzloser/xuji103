@@ -11,7 +11,7 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# MSVC specific settings
+# 010MSVC specific settings
 if(MSVC)
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /utf-8")
 endif()

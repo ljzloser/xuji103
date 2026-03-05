@@ -31,9 +31,9 @@ set(IEC103_HEADERS
     include/iec103/transport/TcpTransport.h
 )
 
-add_library(iec103 STATIC ${IEC103_SOURCES} ${IEC103_HEADERS})
+add_library(xuji_iec103 STATIC ${IEC103_SOURCES} ${IEC103_HEADERS})
 
-target_include_directories(iec103
+target_include_directories(xuji_iec103
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
@@ -41,10 +41,10 @@ target_include_directories(iec103
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_link_libraries(iec103
+target_link_libraries(xuji_iec103
     PUBLIC
         Qt5::Core
         Qt5::Network
 )
 
-target_compile_features(iec103 PUBLIC cxx_std_14)
+target_compile_features(xuji_iec103 PUBLIC cxx_std_14)

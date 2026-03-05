@@ -15,7 +15,6 @@ public:
     void onDisconnected() override;
     void onError(const QString& error) override;
     void onLinkStateChanged(IEC103::LinkState state) override;
-    
     void onDoublePoint(const IEC103::DigitalPoint& point) override;
     void onAnalogValue(const IEC103::AnalogPoint& point) override;
     void onCounterValue(const IEC103::CounterPoint& point) override;
