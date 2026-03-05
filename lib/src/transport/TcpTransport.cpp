@@ -99,8 +99,13 @@ void TcpTransport::onSocketError(QAbstractSocket::SocketError error) {
     Q_UNUSED(error)
     QString err = m_socket->errorString();
     qWarning() << "TcpTransport: Socket error:" << err;
-    setState(LinkState::Error);
+    setState(LinkState::Disconnected);  // 改为Disconnected状态以便重连
     emit errorOccurred(err);
+    
+    // 连接失败后自动重连
+    if (m_config.autoReconnect) {
+        startReconnectTimer();
+    }
 }
 
 void TcpTransport::onReconnectTimer() {
