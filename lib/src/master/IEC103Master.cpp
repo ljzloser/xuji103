@@ -446,23 +446,65 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
             point.dataType = item.gdd.dataType;
             
             // 根据dataType解析值
-            if (item.gdd.dataType == static_cast<uint8_t>(DataType::R32_23)) {
-                // 浮点数 (遥测)
-                point.value = item.toFloat();
-                Logger::info(QString("Generic(float): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=7")
+            switch (item.gdd.dataType) {
+            case static_cast<uint8_t>(DataType::OS8ASCII):
+                // ASCII字符串
+                point.value = item.toAsciiString();
+                Logger::info(QString("Generic(string): Dev=%1 Group=%2 Entry=%3 Value=\"%4\" DataType=1")
                             .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
-                            .arg(point.toFloat()));
-            } else if (item.gdd.dataType == static_cast<uint8_t>(DataType::UI)) {
-                // 无符号整数 (遥脉)
+                            .arg(point.value.toString()));
+                break;
+                
+            case static_cast<uint8_t>(DataType::UI):
+                // 无符号整数 (遥脉/状态量)
                 point.value = item.toUInt32();
                 Logger::info(QString("Generic(uint): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=3")
                             .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(point.toUInt32()));
-            } else {
-                // 其他类型
-                Logger::info(QString("Generic(other): Dev=%1 Group=%2 Entry=%3 DataType=%4")
+                break;
+                
+            case static_cast<uint8_t>(DataType::I):
+            case static_cast<uint8_t>(DataType::UF):
+                // 有符号整数
+                point.value = item.toInt32();
+                Logger::info(QString("Generic(int): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=%5")
                             .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
-                            .arg(item.gdd.dataType));
+                            .arg(point.toInt32()).arg(item.gdd.dataType));
+                break;
+                
+            case static_cast<uint8_t>(DataType::R32_23):
+            case static_cast<uint8_t>(DataType::F):
+                // 浮点数 (遥测)
+                point.value = item.toFloat();
+                Logger::info(QString("Generic(float): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=%5")
+                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                            .arg(point.toFloat(), 0, 'f', 2).arg(item.gdd.dataType));
+                break;
+                
+            case static_cast<uint8_t>(DataType::DPI):
+                // 双点信息
+                point.value = static_cast<int>(item.toDPI());
+                Logger::info(QString("Generic(dpi): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=9")
+                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                            .arg(static_cast<int>(item.toDPI())));
+                break;
+                
+            default:
+                // 其他类型: 尝试作为原始数据处理
+                if (item.gdd.dataSize == 4 && item.gid.size() >= 4) {
+                    // 尝试作为浮点数或整数
+                    point.value = item.toFloat();
+                    Logger::info(QString("Generic(raw4): Dev=%1 Group=%2 Entry=%3 DataType=%4 Size=%5")
+                                .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                                .arg(item.gdd.dataType).arg(item.gdd.dataSize));
+                } else {
+                    // 记录原始数据
+                    point.value = QString("[raw:%1 bytes]").arg(item.gid.size());
+                    Logger::info(QString("Generic(unknown): Dev=%1 Group=%2 Entry=%3 DataType=%4 Size=%5")
+                                .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                                .arg(item.gdd.dataType).arg(item.gdd.dataSize));
+                }
+                break;
             }
             
             // 统一回调
