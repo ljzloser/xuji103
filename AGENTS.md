@@ -18,8 +18,7 @@
 | **长度域** | 1字节 | **2字节**（最大2045） |
 | **ASDU地址** | 1字节 | **2字节**（设备地址+CPU号） |
 | **时标** | CP32Time2a(4字节) | **CP56Time2a(7字节)** |
-| **遥测传输** | ASDU9/21 | **通用服务ASDU10** |
-| **遥脉传输** | ASDU15 | **通用服务ASDU10** |
+| **遥测/遥脉传输** | ASDU9/15 | **通用服务ASDU10** |
 | **配置读取** | 无标准 | **通用服务ASDU21/10** |
 
 ### 1.2 APCI控制域格式
@@ -51,10 +50,198 @@ U格式（控制功能）- 启动/停止/测试:
 
 STARTDT(启动): 0x07  STARTDT确认: 0x0B
 STOPDT(停止):  0x13  STOPDT确认:  0x23
-TESTFR(测试):  0x43  TESTFR确认:  0x83
+TESTFR(测试):  0x43  TESTFR确认: 0x83
 ```
 
-### 1.3 ASDU地址结构
+### 1.3 流量控制参数 (k/w)
+
+> **IEC 104 标准核心机制**：通过滑动窗口实现可靠传输
+
+#### 1.3.1 参数定义
+
+| 参数 | 含义 | 默认值 | 范围 |
+|-----|------|-------|------|
+| **k** | 未被确认的I格式APDU最大数目 | 12 | 1 ~ 32767 |
+| **w** | 最迟确认APDU的最大数目 | 8 | 1 ~ 32767 |
+
+**建议配置**：w ≤ 2k/3
+
+#### 1.3.2 工作原理
+
+```
+主站 (发送方)                         子站 (接收方)
+     │                                     │
+     │───── I(0) ────────────────────────>│
+     │───── I(1) ────────────────────────>│
+     │───── I(2) ────────────────────────>│ ← 收到w个后必须发S帧确认
+     │        ...                          │
+     │───── I(k-1) ──────────────────────>│ ← 发送满k个后必须暂停
+     │                                     │
+     │<──── S(N(R)=k) ─────────────────────│ ← 子站发送确认
+     │                                     │
+     │───── I(k) ────────────────────────>│ ← 收到确认后继续发送
+```
+
+#### 1.3.3 发送方行为（k值控制）
+
+```
+发送I帧前:
+┌─────────────────────────────────────────────────────┐
+│ if (unconfirmedCount() >= k) {                      │
+│     // 暂停发送，等待确认                            │
+│     // 可设置超时，超时则断开连接                    │
+│     return;                                         │
+│ }                                                   │
+│ // 正常发送                                         │
+│ sendIFrame(...);                                    │
+└─────────────────────────────────────────────────────┘
+```
+
+#### 1.3.4 接收方行为（w值控制）
+
+```
+收到I帧后:
+┌─────────────────────────────────────────────────────┐
+│ recvCount++;                                        │
+│ if (recvCount >= w) {                               │
+│     // 立即发送S帧确认                              │
+│     sendSFrame(recvSeq);                            │
+│     recvCount = 0;                                  │
+│ } else {                                            │
+│     // 启动T2超时，超时后发送确认                   │
+│     startAckTimer();                                │
+│ }                                                   │
+└─────────────────────────────────────────────────────┘
+```
+
+#### 1.3.5 与T2超时的关系
+
+| 机制 | 触发条件 | 说明 |
+|-----|---------|------|
+| **w计数** | 收到w个I帧 | 立即确认，响应快 |
+| **T2超时** | T2时间到期 | 兜底确认，防止丢确认 |
+
+**完整实现应同时支持两种机制**：
+- 收到w个I帧后立即发S帧
+- 若w计数未触发但T2超时，也发S帧
+
+#### 1.3.6 实现状态
+
+| 功能 | 状态 | 代码位置 |
+|-----|------|---------|
+| k/w 常量定义 | ✅ 已实现 | `Constants.h` |
+| 未确认计数 | ✅ 已实现 | `SeqManager::unconfirmedCount()` |
+| **k值发送控制** | ✅ 已实现 | `IEC103Master::generalInterrogation()` / `readGenericGroup()` |
+| **w值确认触发** | ✅ 已实现 | `IEC103Master::processIFrame()` |
+| T2超时确认 | ✅ 已实现 | `IEC103Master::onAckTimeout()` |
+
+#### 1.3.7 实现代码示例
+
+**k值发送控制** (`IEC103Master.cpp`):
+```cpp
+void IEC103Master::generalInterrogation(uint16_t deviceAddr) {
+    if (!isConnected()) {
+        Logger::warning("Cannot send GI, not connected");
+        return;
+    }
+
+    // k值控制：未确认帧数超过k时暂停发送
+    uint16_t unconfirmed = m_seqManager.unconfirmedCount();
+    if (unconfirmed >= m_config.maxUnconfirmed) {
+        Logger::warning(QString("[k-Control] Send blocked: unconfirmed=%1 >= k=%2")
+                        .arg(unconfirmed).arg(m_config.maxUnconfirmed));
+        return;
+    }
+    // ... 正常发送逻辑 ...
+}
+```
+
+**w值确认触发** (`IEC103Master.cpp`):
+```cpp
+void IEC103Master::processIFrame(const Frame& frame) {
+    // ... 序号验证 ...
+    
+    m_seqManager.nextRecvSeq();
+
+    // w值控制：收到w个I帧后立即确认
+    m_seqManager.incrementRecvCount();
+    uint8_t recvCount = m_seqManager.recvCount();
+    
+    if (recvCount >= m_config.maxAckDelay) {
+        sendAck();
+        m_seqManager.resetRecvCount();
+        stopAckTimer();
+    } else {
+        startAckTimer();  // T2兜底
+    }
+    // ... ASDU处理 ...
+}
+```
+
+### 1.4 协议合规性规则
+
+> **IEC 104 标准关键错误处理规则**
+
+#### 1.4.1 序号验证规则
+
+| 场景 | 验证内容 | 错误处理 |
+|-----|---------|---------|
+| **接收I帧** | N(S) 必须等于期望的接收序号 | 断开连接 |
+| **接收S帧** | N(R) 不能大于已发送序号 | 断开连接 |
+| **I帧确认** | N(R) 在有效范围内确认 | 断开连接 |
+
+```
+正确行为:
+┌─────────────────────────────────────────────────────┐
+│ 收到 I 帧: N(S) 必须等于 recvSeq                    │
+│   - 正确: 递增 recvSeq, 处理 ASDU                   │
+│   - 错误: 断开连接, 重新同步                        │
+│                                                     │
+│ 收到 S 帧: N(R) 必须 ≤ sendSeq                      │
+│   - 正确: 更新 lastAckSeq, 减少未确认计数           │
+│   - 错误: 对方确认了未发送的帧, 断开连接            │
+└─────────────────────────────────────────────────────┘
+```
+
+#### 1.4.2 超时处理规则
+
+| 超时 | 参数 | 触发条件 | 处理方式 |
+|-----|-----|---------|---------|
+| **T1** | 15秒 | 发送APDU后未收到响应 | 断开连接 |
+| **T2** | 10秒 | 收到I帧后未发确认 | 发送S帧确认 |
+| **T3** | 20秒 | 空闲时发送TESTFR | 等待确认 |
+| **TESTFR超时** | T1 | 发送TESTFR后未收到确认 | 断开连接 |
+
+#### 1.4.3 连接状态机
+
+```
+                    TCP连接成功
+                         │
+                         ▼
+┌─────────────┐    STARTDT_ACT    ┌─────────────┐
+│  Connected  │ ────────────────> │   Started   │
+│  (未启动)   │                   │   (已启动)  │
+└─────────────┘                   └─────────────┘
+       │                                 │
+       │ 断开                            │ 断开
+       │                                 │
+       ▼                                 ▼
+┌─────────────┐                   ┌─────────────┐
+│Disconnected │ <─────────────────│Disconnected │
+└─────────────┘   任何错误/超时   └─────────────┘
+```
+
+#### 1.4.4 错误断开条件
+
+| 错误类型 | 说明 | 处理 |
+|---------|------|-----|
+| 序号错误 | N(S) ≠ 期望值，N(R) > 发送值 | 立即断开 |
+| TESTFR超时 | 发送测试帧后T1内无响应 | 立即断开 |
+| T1超时 | 发送命令后T1内无响应 | 立即断开 |
+| k值超时 | 未确认帧达到k值且超时未收到确认 | 立即断开 |
+| 帧解析失败 | 无法解析的帧格式 | 立即断开 |
+
+### 1.5 ASDU地址结构
 
 ```
 ┌─────────────────────────────────────────────────┐
@@ -187,9 +374,8 @@ TESTFR(测试):  0x43  TESTFR确认:  0x83
 │                          │                              │
 │  ┌─────────────────────────────────────────────────┐    │
 │  │                   data/                          │    │
-│  │  - analog.py:  模拟遥测数据生成                  │    │
 │  │  - digital.py: 模拟遥信数据生成                  │    │
-│  │  - counter.py: 模拟遥脉数据生成                  │    │
+│  │  - generic.py: 模拟通用服务数据(遥测/遥脉)       │    │
 │  └─────────────────────────────────────────────────┘    │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -291,9 +477,8 @@ xuji103/
 │   │   │   └── frame.py              # 帧处理
 │   │   ├── data/                     # 模拟数据
 │   │   │   ├── __init__.py
-│   │   │   ├── analog.py             # 遥测数据
 │   │   │   ├── digital.py            # 遥信数据
-│   │   │   └── counter.py            # 遥脉数据
+│   │   │   └── generic.py            # 通用服务数据(遥测/遥脉)
 │   │   └── requirements.txt          # Python依赖
 ├── docs/                             # 文档
 │   └── AGENTS.md
@@ -331,8 +516,10 @@ public:
         int timeout = 15000;           // T1超时
         int ackTimeout = 10000;        // T2超时
         int testInterval = 20000;      // T3测试间隔
-        int maxUnconfirmed = 12;       // k值
-        int maxAckDelay = 8;           // w值
+        int maxUnconfirmed = 12;       // k值: 最大未确认I格式APDU数
+                                       // 发送方: 未确认数≥k时暂停发送
+        int maxAckDelay = 8;           // w值: 最迟确认APDU数
+                                       // 接收方: 收到w个I帧后立即发S帧确认
     };
 
     explicit IEC103Master(QObject* parent = nullptr);
@@ -370,38 +557,48 @@ class IDataHandler {
 public:
     virtual ~IDataHandler() = default;
 
-    // 遥信（双点）- 总召唤响应ASDU42或突发ASDU1
-    virtual void onDoublePoint(quint16 deviceAddr, quint16 infoAddr,
-                               DoublePointValue value, const Quality& q,
-                               const QDateTime& time) {}
+    // ========== 遥信回调 ==========
 
-    // 遥信（单点）- 突发ASDU1
-    virtual void onSinglePoint(quint16 deviceAddr, quint16 infoAddr,
-                               bool value, const Quality& q,
-                               const QDateTime& time) {}
+    // 双点遥信 (总召唤响应ASDU42或突发ASDU1)
+    // 南网规范统一使用双点遥信，单点由子站转换为双点
+    virtual void onDoublePoint(const DigitalPoint& point) {}
 
-    // 遥测（通用服务ASDU10）- 32位浮点工程值
-    virtual void onAnalogValue(quint16 deviceAddr, quint8 group, quint8 entry,
-                               float value, const Quality& q,
-                               const QString& unit) {}
+    // ========== 通用服务回调 (遥测/遥脉统一) ==========
 
-    // 遥脉（通用服务ASDU10）- 积分总量
-    virtual void onIntegratedTotal(quint16 deviceAddr, quint8 group, quint8 entry,
-                                   quint32 value, const Quality& q,
-                                   const QDateTime& time) {}
+    // 通用服务数据 (ASDU10)
+    // dataType由GDD.DataType决定: 7=浮点数(遥测), 3=无符号整数(遥脉)
+    virtual void onGenericValue(const GenericPoint& point) {}
 
-    // 通用服务数据（原始格式）
-    virtual void onGenericData(quint16 deviceAddr, const GenericDataItem& item) {}
+    // 通用分类数据 (原始格式) - 用于自定义解析
+    virtual void onGenericData(uint16_t deviceAddr, const GenericDataItem& item) {}
 
-    // 链路状态
+    // ========== 链路状态回调 ==========
+
+    // 链路状态变化
     virtual void onLinkStateChanged(LinkState state) {}
-    
+
+    // 连接成功
+    virtual void onConnected() {}
+
+    // 断开连接
+    virtual void onDisconnected() {}
+
+    // 发生错误
+    virtual void onError(const QString& error) {}
+
+    // ========== 总召唤回调 ==========
+
+    // 总召唤开始
+    virtual void onGIStarted(uint16_t deviceAddr) {}
+
     // 总召唤完成
-    virtual void onGICompleted(quint16 deviceAddr) {}
+    virtual void onGICompleted(uint16_t deviceAddr) {}
 };
 ```
 
-### 5.3 数据质量标志
+### 5.3 数据结构定义
+
+#### 5.3.1 数据质量标志
 
 ```cpp
 struct Quality {
@@ -410,16 +607,56 @@ struct Quality {
     bool substituted = false;  // SB: 被取代
     bool blocked = false;      // BL: 被封锁
     bool overflow = false;     // OV: 溢出（遥测专用）
-    
+
+    bool isGood() const { return !invalid && !notTopical && !substituted && !blocked; }
     static Quality fromByte(quint8 byte);
 };
 
 // 双点遥信值
 enum class DoublePointValue : uint8_t {
-    Indeterminate = 0,   // 不确定
+    Indeterminate0 = 0,  // 不确定
     Off = 1,             // 分/开
     On = 2,              // 合/关
-    Indeterminate_ = 3   // 不确定
+    Indeterminate3 = 3   // 不确定
+};
+```
+
+#### 5.3.2 遥信数据点 (DigitalPoint)
+
+```cpp
+struct DigitalPoint {
+    uint16_t deviceAddr = 0;      // 设备地址
+    uint8_t fun = 0;              // 功能类型
+    uint8_t inf = 0;              // 信息序号
+    DoublePointValue value = DoublePointValue::Indeterminate0;
+    Quality quality;
+    QDateTime eventTime;          // 事件发生时间
+    QDateTime recvTime;           // 子站接收时间
+
+    // 便捷方法
+    bool isOn() const { return value == DoublePointValue::On; }
+    bool isOff() const { return value == DoublePointValue::Off; }
+    bool isValid() const { return quality.isGood(); }
+};
+```
+
+#### 5.3.3 通用服务数据点 (GenericPoint)
+
+```cpp
+struct GenericPoint {
+    uint16_t deviceAddr = 0;      // 设备地址
+    uint8_t group = 0;            // 组号
+    uint8_t entry = 0;            // 条目号
+    uint8_t dataType = 0;         // GDD.DataType: 7=浮点, 3=整数
+    QVariant value;               // 根据dataType解析的值
+    Quality quality;
+    QString unit;                 // 单位
+
+    // 便捷方法
+    bool isFloat() const { return dataType == 7; }
+    bool isInteger() const { return dataType == 3; }
+    float toFloat() const { return value.toFloat(); }
+    uint32_t toUInt32() const { return value.toUInt(); }
 };
 ```
 
@@ -453,14 +690,16 @@ struct CP56Time2a {
 
 ### 6.1 APDU结构
 
+> **南网规范帧格式（参照104标准）：无校验和，无结束字节**
+
 ```
-┌──────┬──────────┬──────────┬─────────────────────────┬──────┐
-│ 68H  │ 长度L    │ 长度L    │ APCI (4字节) + ASDU     │ CS   │
-│      │ 低字节   │ 高字节   │                         │      │
-└──────┴──────────┴──────────┴─────────────────────────┴──────┘
+┌──────┬──────────┬──────────┬─────────────────────────┐
+│ 68H  │ 长度L    │ 长度L    │ APCI (4字节) + ASDU     │
+│      │ 低字节   │ 高字节   │                         │
+└──────┴──────────┴──────────┴─────────────────────────┘
 
 长度L = APCI长度(4) + ASDU长度
-最大长度 = 2045 (APDU_MAX = 2048 - 启动字符 - 长度域(2字节))
+最大长度 = 2045 (APDU_MAX = 2048 - 启动字符(1) - 长度域(2字节))
 ```
 
 ### 6.2 ASDU结构
@@ -483,15 +722,15 @@ COT: 传输原因 (2字节，高字节为PN+T)
 | ASDU | TI | 方向 | 用途 | 实现状态 |
 |------|-----|------|------|----------|
 | **遥信相关** |||||
-| ASDU1 | 01H | 监视 | 带时标的报文（突发上送，含DPI） | ✓ 需实现 |
-| ASDU2 | 02H | 监视 | 带相对时间的时标报文（保护动作事件） | ✓ 需实现 |
-| **ASDU42** | **2AH** | 监视 | **双点信息状态（总召唤响应，南网扩展）** | ✓ 需实现 |
-| **遥测/遥脉相关** |||||
-| ASDU10 | 0AH | 监视 | 通用分类数据（遥测/遥脉上送） | ✓ 需实现 |
-| ASDU21 | 15H | 控制 | 通用分类读命令（召唤遥测/遥脉） | ✓ 需实现 |
+| ASDU1 | 01H | 监视 | 带时标的报文（突发上送，含DPI） | ✓ 已实现 |
+| ASDU2 | 02H | 监视 | 带相对时间的时标报文（保护动作事件） | ✓ 已实现 |
+| **ASDU42** | **2AH** | 监视 | **双点信息状态（总召唤响应，南网扩展）** | ✓ 已实现 |
+| **遥测/遥脉** |||||
+| ASDU10 | 0AH | 监视 | 通用分类数据（遥测/遥脉上送） | ✓ 已实现 |
+| ASDU21 | 15H | 控制 | 通用分类读命令（召唤遥测/遥脉） | ✓ 已实现 |
 | **总召唤相关** |||||
-| ASDU7 | 07H | 控制 | 总召唤命令 | ✓ 需实现 |
-| ASDU8 | 08H | 监视 | 总召唤结束 | ✓ 需实现 |
+| ASDU7 | 07H | 控制 | 总召唤命令 | ✓ 已实现 |
+| ASDU8 | 08H | 监视 | 总召唤结束 | ✓ 已实现 |
 
 **不实现的ASDU**（超出项目范围）：
 - ASDU6 (时钟同步) - 控制功能
@@ -857,10 +1096,8 @@ COT: 传输原因 (2字节，高字节为PN+T)
 └─────────────────────────────────────┘
                   ↓
 ┌─────────────────────────────────────┐
-│      需要读子站配置？(可选)          │
-│        ↓是        ↓否              │
-│   读取子站配置    │                 │
-│        ↓←─────────┘                 │
+│      加载配置文件                    │
+│  (组号、召唤间隔等)                  │
 └─────────────────────────────────────┘
                   ↓
 ┌─────────────────────────────────────┐
@@ -872,17 +1109,9 @@ COT: 传输原因 (2字节，高字节为PN+T)
 └─────────────────────────────────────┘
                   ↓
 ┌─────────────────────────────────────┐
-│      遥测召唤时间到？                │
+│    通用服务召唤时间到？              │
 │        ↓是        ↓否              │
-│   读模拟量组(遥测)│                 │
-│   ASDU21→10       │                 │
-│        ↓←─────────┘                 │
-└─────────────────────────────────────┘
-                  ↓
-┌─────────────────────────────────────┐
-│      遥脉召唤时间到？                │
-│        ↓是        ↓否              │
-│   读积分总量组(遥脉)│               │
+│  读配置的组(遥测/遥脉)              │
 │   ASDU21→10       │                 │
 │        ↓←─────────┘                 │
 └─────────────────────────────────────┘
@@ -892,7 +1121,7 @@ COT: 传输原因 (2字节，高字节为PN+T)
         └─────────────────┘
 ```
 
-> **说明**：相比南网规范原图，本项目删除了"命令处理"和"对时"两个控制功能分支，新增了"遥测召唤"和"遥脉召唤"两个数据采集分支。
+> **说明**：遥测和遥脉统一通过通用服务召唤，组号从配置文件读取。
 
 ### 13.2 总召唤流程（遥信）
 
@@ -916,25 +1145,31 @@ COT: 传输原因 (2字节，高字节为PN+T)
 
 > **注意**：总召唤仅上送持续性状态量（开关量、压板状态、通讯状态等）
 
-### 13.3 遥测召唤流程（通用服务）
+### 13.3 通用服务召唤流程（遥测/遥脉）
+
+> **组号从配置文件读取，数据类型由GDD.DataType决定**
 
 ```
 主站                                    子站
   │                                       │
   │───── ASDU21 (读一组全部条目) ───────>│
   │        FUN=FE, INF=F1                 │
-  │        GIN=组号, KOD=01(实际值)       │
+  │        GIN=组号(从配置读取)            │
+  │        KOD=01(实际值)                 │
   │                                       │
   │<──── ASDU10 (通用分类数据) ──────────│
   │        FUN=FE, INF=F1                 │
   │        NGD=条目数                     │
   │        GIN/KOD/GDD/GID...             │
+  │        GDD.DataType决定数据类型:      │
+  │          7 = 浮点数(遥测)             │
+  │          3 = 无符号整数(遥脉)         │
   │                                       │
 ```
 
-### 13.4 遥脉召唤流程（通用服务）
-
-与遥测流程相同，通过通用服务读取积分总量组的值。
+> **注意**：遥测和遥脉使用相同的流程，区别仅在于：
+> - 组号不同（从配置文件读取）
+> - 数据类型不同（由GDD.DataType决定）
 
 ---
 
@@ -1017,60 +1252,59 @@ INF (本项目使用的读命令):
 ## 十五、开发阶段
 
 ### Phase 1: 库基础架构
-- [ ] 项目结构搭建 (lib/app/tests分离)
-- [ ] CMake配置 (静态库 + 控制台程序)
-- [ ] 基础类型定义 (types/)
+- [x] 项目结构搭建 (lib/app/tests分离)
+- [x] CMake配置 (静态库 + 控制台程序)
+- [x] 基础类型定义 (types/)
 
 ### Phase 2: APCI基础层
-- [ ] APDU帧结构定义
-- [ ] 帧编解码 (FrameCodec)
-- [ ] 序号管理器 (SeqManager)
-- [ ] I/S/U格式处理
-- [ ] 校验和计算
+- [x] APDU帧结构定义
+- [x] 帧编解码 (FrameCodec)
+- [x] 序号管理器 (SeqManager)
+- [x] I/S/U格式处理
+- [x] **k值发送控制** (未确认帧数≥k时暂停发送)
+- [x] **w值确认触发** (收到w个I帧后立即发S帧)
 
 ### Phase 3: ASDU层（三遥解析）
-- [ ] ASDU基础结构
-- [ ] CP56Time2a时标处理
-- [ ] **遥信解析**: ASDU1 (单点突发) / ASDU42 (双点总召唤)
-- [ ] **遥测解析**: ASDU10 (通用服务浮点值)
-- [ ] **遥脉解析**: ASDU10 (通用服务积分总量)
-- [ ] Quality质量标志解析
+- [x] ASDU基础结构
+- [x] CP56Time2a时标处理
+- [x] **遥信解析**: ASDU1 (突发) / ASDU42 (总召唤)
+- [x] **通用服务解析**: ASDU10 (遥测/遥脉统一)
+- [x] Quality质量标志解析
 
 ### Phase 4: 通用服务
-- [ ] ASDU10/21 编解码
-- [ ] GIN/KOD/GDD/GID结构
-- [ ] 数据类型213-217解析
-- [ ] 读一组全部条目 (INF=F1)
+- [x] ASDU10/21 编解码
+- [x] GIN/KOD/GDD/GID结构
+- [x] 数据类型213-217解析
+- [x] 读一组全部条目 (INF=F1)
 
 ### Phase 5: 传输层
-- [ ] TCP传输封装
-- [ ] STARTDT/STOPDT/TESTFR
-- [ ] 断线重连机制
-- [ ] 超时处理 (T1/T2/T3)
+- [x] TCP传输封装
+- [x] STARTDT/STOPDT/TESTFR
+- [x] 断线重连机制
+- [x] 超时处理 (T1/T2/T3)
 
 ### Phase 6: 库API层
-- [ ] IEC103Master主类
-- [ ] **总召唤流程** (ASDU7→ASDU42→ASDU8)
-- [ ] **遥测召唤** (通用服务读模拟量组)
-- [ ] **遥脉召唤** (通用服务读积分总量组)
-- [ ] 数据回调机制
+- [x] IEC103Master主类
+- [x] **总召唤流程** (ASDU7→ASDU42→ASDU8)
+- [x] **通用服务召唤** (ASDU21→ASDU10，遥测/遥脉统一)
+- [x] 数据回调机制
 
 ### Phase 7: 控制台程序
-- [ ] 命令行参数解析
-- [ ] 配置文件加载
-- [ ] DataPrinter数据输出
-- [ ] 日志系统
+- [x] 命令行参数解析
+- [x] 配置文件加载
+- [x] DataPrinter数据输出
+- [x] 日志系统
 
 ### Phase 8: Python测试子站
-- [ ] TCP服务器框架
-- [ ] APCI编解码 (apci.py)
-- [ ] ASDU编解码 (asdu.py)
-- [ ] 模拟数据生成 (data/)
-- [ ] 总召唤响应
-- [ ] 通用服务响应
+- [x] TCP服务器框架
+- [x] APCI编解码 (apci.py)
+- [x] ASDU编解码 (asdu.py)
+- [x] 模拟数据生成 (data/)
+- [x] 总召唤响应
+- [x] 通用服务响应
 
 ### Phase 9: 测试与文档
-- [ ] 集成测试 (主站+Python子站)
+- [x] 集成测试 (主站+Python子站)
 - [ ] API文档
 
 ---
@@ -1178,7 +1412,7 @@ python slave.py --port 2404
 | 库 | 用途 | 状态 |
 |----|------|------|
 | Qt5::Core | 核心框架、信号槽 | ✓ 已集成 |
-| Qt5::Network | TCP通信 | 待添加 |
+| Qt5::Network | TCP通信 | ✓ 已集成 |
 | Qt5::Test | 单元测试 | 可选 |
 
 ---
@@ -1192,32 +1426,31 @@ python slave.py --port 2404
 
 class MyHandler : public IDataHandler {
 public:
-    // 遥信回调（双点）
-    void onDoublePoint(quint16 dev, quint16 addr, DoublePointValue val,
-                       const Quality& q, const QDateTime& time) override {
-        qDebug() << "遥信:" << dev << addr
-                 << (val == DoublePointValue::On ? "合" : "分")
-                 << "时间:" << time.toString();
+    // 遥信回调（双点）- 总召唤响应ASDU42或突发ASDU1
+    void onDoublePoint(const DigitalPoint& point) override {
+        qDebug() << "遥信: 装置=" << point.deviceAddr
+                 << "FUN=" << point.fun << "INF=" << point.inf
+                 << (point.isOn() ? "合" : "分")
+                 << "时间:" << point.eventTime.toString();
     }
 
-    // 遥测回调（浮点值）
-    void onAnalogValue(quint16 dev, quint8 group, quint8 entry,
-                       float value, const Quality& q, const QString& unit) override {
-        qDebug() << "遥测:" << dev << "组" << group << "条目" << entry
-                 << "=" << value << unit;
-    }
-
-    // 遥脉回调（积分总量）
-    void onIntegratedTotal(quint16 dev, quint8 group, quint8 entry,
-                           quint32 value, const Quality& q,
-                           const QDateTime& time) override {
-        qDebug() << "遥脉:" << dev << "组" << group << "条目" << entry
-                 << "=" << value << "时间:" << time.toString();
+    // 通用服务回调（遥测/遥脉统一）- ASDU10
+    // dataType由GDD.DataType决定: 7=浮点(遥测), 3=整数(遥脉)
+    void onGenericValue(const GenericPoint& point) override {
+        if (point.isFloat()) {  // 浮点数 (遥测)
+            qDebug() << "遥测: 装置=" << point.deviceAddr
+                     << "组=" << point.group << "条目=" << point.entry
+                     << "=" << point.toFloat() << point.unit;
+        } else if (point.isInteger()) {  // 无符号整数 (遥脉)
+            qDebug() << "遥脉: 装置=" << point.deviceAddr
+                     << "组=" << point.group << "条目=" << point.entry
+                     << "=" << point.toUInt32() << point.unit;
+        }
     }
 
     // 总召唤完成
-    void onGICompleted(quint16 dev) override {
-        qDebug() << "总召唤完成:" << dev;
+    void onGICompleted(uint16_t dev) override {
+        qDebug() << "总召唤完成: 装置=" << dev;
     }
 };
 
@@ -1231,10 +1464,13 @@ int main(int argc, char *argv[]) {
     master.setConfig({"192.168.1.100", 2404});
     master.connectToServer();
 
-    // 连接成功后执行总召唤（遥信）
+    // 连接成功后执行召唤
     QObject::connect(&master, &IEC103Master::connected, [&]() {
-        master.generalInterrogation(0);  // 召唤子站遥信
-        master.readGenericGroup(1, 0x08);  // 召唤模拟量组（遥测）
+        master.generalInterrogation(0);  // 总召唤（遥信）
+        // 召唤通用服务组（组号从配置读取）
+        for (auto group : Config::instance().groups()) {
+            master.readGenericGroup(1, group);
+        }
     });
 
     return app.exec();
@@ -1262,8 +1498,12 @@ int main(int argc, char *argv[]) {
   },
   "polling": {
     "gi_interval": 60000,
-    "analog_groups": [8, 9, 10],
-    "counter_groups": [16, 17]
+    "groups": [
+      {"group": 8, "name": "电流电压", "data_type": 7},
+      {"group": 9, "name": "功率频率", "data_type": 7},
+      {"group": 16, "name": "电能量", "data_type": 3},
+      {"group": 17, "name": "运行时间", "data_type": 3}
+    ]
   },
   "logging": {
     "level": "info",
@@ -1271,6 +1511,11 @@ int main(int argc, char *argv[]) {
   }
 }
 ```
+
+> **说明**：
+> - `groups` 数组定义要召唤的组，组号由子站配置决定
+> - `data_type` 用于提示数据类型：7=浮点数(遥测), 3=整数(遥脉)
+> - 实际数据类型由响应报文中的GDD.DataType决定
 
 ### 21.3 输出示例
 
@@ -1281,8 +1526,9 @@ int main(int argc, char *argv[]) {
 [2026-03-04 10:30:15.234] [DATA] 遥信 装置1 开关1 合 时间:2026-03-04 10:30:15
 [2026-03-04 10:30:15.235] [DATA] 遥信 装置1 开关2 分 时间:2026-03-04 10:30:15
 [2026-03-04 10:30:15.300] [INFO] 总召唤完成 装置1
-[2026-03-04 10:30:16.100] [DATA] 遥测 装置1 组8 条目1 = 100.5 A
-[2026-03-04 10:30:16.101] [DATA] 遥测 装置1 组8 条目2 = 220.3 V
+[2026-03-04 10:30:16.100] [DATA] 通用服务 装置1 组8 条目1 = 100.5 A (浮点)
+[2026-03-04 10:30:16.101] [DATA] 通用服务 装置1 组8 条目2 = 220.3 V (浮点)
+[2026-03-04 10:30:17.100] [DATA] 通用服务 装置1 组16 条目1 = 12345 kWh (整数)
 ```
 
 ---
@@ -1339,20 +1585,35 @@ python slave.py --port 2404 --log-level debug
       "address": 1,
       "name": "测试装置1",
       "digitals": [
-        {"info_addr": 1, "name": "开关1", "value": "on"},
-        {"info_addr": 2, "name": "开关2", "value": "off"}
+        {"fun": 200, "inf": 1, "name": "开关1", "value": "on"},
+        {"fun": 200, "inf": 2, "name": "开关2", "value": "off"}
       ],
-      "analogs": [
-        {"group": 8, "entry": 1, "name": "电流A相", "value": 100.5, "unit": "A"},
-        {"group": 8, "entry": 2, "name": "电压A相", "value": 220.3, "unit": "V"}
-      ],
-      "counters": [
-        {"group": 16, "entry": 1, "name": "正向有功电能", "value": 12345}
+      "groups": [
+        {
+          "group": 8,
+          "name": "电流电压",
+          "entries": [
+            {"entry": 1, "name": "电流A相", "value": 100.5, "unit": "A", "data_type": 7},
+            {"entry": 2, "name": "电压A相", "value": 220.3, "unit": "V", "data_type": 7}
+          ]
+        },
+        {
+          "group": 16,
+          "name": "电能量",
+          "entries": [
+            {"entry": 1, "name": "正向有功电能", "value": 12345, "unit": "kWh", "data_type": 3}
+          ]
+        }
       ]
     }
   ]
 }
 ```
+
+> **说明**：
+> - `digitals`: 遥信数据，用于总召唤(ASDU42)和突发(ASDU1)
+> - `groups`: 通用服务数据（遥测/遥脉统一），用于响应ASDU21读命令
+> - `data_type`: 数据类型，7=浮点数，3=无符号整数
 
 ### 23.5 命令行参数
 
@@ -1365,4 +1626,4 @@ python slave.py --port 2404 --log-level debug
 
 ---
 
-*最后更新: 2026-03-04*
+*最后更新: 2026-03-06*

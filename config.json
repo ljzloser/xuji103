@@ -1,0 +1,26 @@
+{
+  "connection": {
+    "host": "127.0.0.1",
+    "port": 2404,
+    "timeout": 15000,
+    "reconnect_interval": 5000,
+    "auto_reconnect": true,
+    "test_interval": 20000,
+    "max_unconfirmed": 12,
+    "max_ack_delay": 3
+  },
+  "polling": {
+    "gi_interval": 60,
+    "group_interval": 5,
+    "groups": [
+      {"group": 1, "name": "装置模拟量"},
+      {"group": 2, "name": "装置状态量"},
+      {"group": 3, "name": "装置定值"},
+      {"group": 4, "name": "软压板"}
+    ]
+  },
+  "logging": {
+    "level": "info",
+    "file": ""
+  }
+}

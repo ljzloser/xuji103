@@ -5,6 +5,7 @@
 #include "TimeStamp.h"
 #include <QString>
 #include <QDateTime>
+#include <QVariant>
 #include <vector>
 
 namespace IEC103 {
@@ -34,32 +35,36 @@ struct DigitalPoint {
     }
 };
 
-// 遥测数据点 (模拟量)
-struct AnalogPoint {
+// 通用服务数据点 (遥测/遥脉统一)
+// 数据类型由GDD.DataType决定: 7=浮点数(遥测), 3=无符号整数(遥脉)
+struct GenericPoint {
     uint16_t deviceAddr = 0;      // 设备地址
     uint8_t group = 0;            // 组号
     uint8_t entry = 0;            // 条目号
-    float value = 0.0f;           // 工程值
-    Quality quality;
-    QString unit;                 // 单位
-    QString description;          // 描述
-    QDateTime timestamp;          // 时间戳 (如果有)
-
-    bool isValid() const { return quality.isGood(); }
-};
-
-// 遥脉数据点 (积分总量)
-struct CounterPoint {
-    uint16_t deviceAddr = 0;      // 设备地址
-    uint8_t group = 0;            // 组号
-    uint8_t entry = 0;            // 条目号
-    uint32_t value = 0;           // 积分值
+    uint8_t dataType = 0;         // GDD.DataType: 7=浮点, 3=整数
+    QVariant value;               // 根据dataType解析的值
     Quality quality;
     QString unit;                 // 单位
     QString description;          // 描述
     QDateTime timestamp;          // 时间戳
 
     bool isValid() const { return quality.isGood(); }
+    bool isFloat() const { return dataType == 7; }
+    bool isInteger() const { return dataType == 3; }
+    
+    // 便捷方法
+    float toFloat() const { return value.toFloat(); }
+    uint32_t toUInt32() const { return value.toUInt(); }
+    int32_t toInt32() const { return value.toInt(); }
+    
+    QString valueString() const {
+        if (dataType == 7) {
+            return QString::number(value.toFloat(), 'f', 2);
+        } else if (dataType == 3) {
+            return QString::number(value.toUInt());
+        }
+        return value.toString();
+    }
 };
 
 // 通用分类标识序号

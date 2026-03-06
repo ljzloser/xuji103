@@ -62,11 +62,23 @@ public:
     // 是否有未确认的I帧
     bool hasUnconfirmed() const;
 
+    // ========== 接收计数管理（w值控制）==========
+
+    // 获取接收未确认计数
+    uint8_t recvCount() const;
+
+    // 递增接收计数
+    void incrementRecvCount();
+
+    // 重置接收计数（发送确认后调用）
+    void resetRecvCount();
+
 private:
     mutable std::mutex m_mutex;
     uint16_t m_sendSeq;      // 发送序号 N(S)
     uint16_t m_recvSeq;      // 接收序号 N(R)
     uint16_t m_lastAckSeq;   // 最后确认的序号
+    uint8_t m_recvCount = 0; // 接收未确认计数（用于w值控制）
 
     static constexpr uint16_t SEQ_MASK = 0x7FFF;  // 15位序号掩码
     static constexpr uint16_t SEQ_MAX = 32767;    // 最大序号

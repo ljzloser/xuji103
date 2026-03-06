@@ -35,7 +35,8 @@ bool Asdu10Parser::parse(const Asdu& asdu) {
     m_data.rii = data[offset++];
 
     // NGD (包含CONT位)
-    m_data.ngd = data[offset] & 0x3F;
+    // D7 = CONT(后续位), D0-D6 = 数目(7位)
+    m_data.ngd = data[offset] & 0x7F;
     m_data.cont = (data[offset++] & 0x80) != 0;
 
     // 解析数据项
@@ -153,8 +154,8 @@ bool Asdu21Parser::parse(const Asdu& asdu) {
     // RII
     m_data.rii = data[offset++];
 
-    // NGD
-    m_data.ngd = data[offset] & 0x3F;
+    // NGD (D7=CONT, D0-D6=数目)
+    m_data.ngd = data[offset] & 0x7F;
     m_data.cont = (data[offset++] & 0x80) != 0;
 
     // 解析数据项

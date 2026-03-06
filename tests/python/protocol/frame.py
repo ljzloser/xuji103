@@ -61,15 +61,18 @@ class FrameParser:
     
     def has_frame(self) -> bool:
         """检查是否有完整帧"""
-        if len(self.buffer) < 5:
+        # 南网规范帧格式 (参照104标准):
+        # 68H | 长度L(2字节) | APCI(4字节) | ASDU
+        # 无校验和，无结束字节
+        if len(self.buffer) < 7:
             return False
         
         if self.buffer[0] != 0x68:
             return False
         
         length = self.buffer[1] | (self.buffer[2] << 8)
-        # 总长度 = 启动(1) + 长度(2) + APCI+ASDU(length) + 校验(1) + 结束(1) = 5 + length
-        return len(self.buffer) >= length + 5
+        # 总长度 = 启动(1) + 长度(2) + APCI+ASDU(length) = 3 + length
+        return len(self.buffer) >= length + 3
     
     def get_frame(self) -> Optional[Frame]:
         """获取一个完整帧"""
@@ -77,8 +80,8 @@ class FrameParser:
             return None
         
         length = self.buffer[1] | (self.buffer[2] << 8)
-        frame_data = bytes(self.buffer[:length + 5])
-        del self.buffer[:length + 5]
+        frame_data = bytes(self.buffer[:length + 3])
+        del self.buffer[:length + 3]
         
         return Frame.parse(frame_data)
     

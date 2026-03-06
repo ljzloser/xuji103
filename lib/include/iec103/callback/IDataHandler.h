@@ -16,32 +16,18 @@ public:
     // ========== 遥信回调 ==========
 
     // 双点遥信 (总召唤响应ASDU42或突发ASDU1)
+    // 南网规范统一使用双点遥信，单点由子站转换为双点
     virtual void onDoublePoint(const DigitalPoint& point) {
         (void)point; // 默认忽略
     }
 
-    // 单点遥信 (突发ASDU1，如果子站支持)
-    virtual void onSinglePoint(uint16_t deviceAddr, uint16_t infoAddr,
-                               bool value, const Quality& quality,
-                               const QDateTime& time) {
-        (void)deviceAddr; (void)infoAddr; (void)value; (void)quality; (void)time;
-    }
+    // ========== 通用服务回调 (遥测/遥脉统一) ==========
 
-    // ========== 遥测回调 ==========
-
-    // 遥测值 (通用服务ASDU10)
-    virtual void onAnalogValue(const AnalogPoint& point) {
+    // 通用服务数据 (ASDU10)
+    // dataType由GDD.DataType决定: 7=浮点数(遥测), 3=无符号整数(遥脉)
+    virtual void onGenericValue(const GenericPoint& point) {
         (void)point;
     }
-
-    // ========== 遥脉回调 ==========
-
-    // 遥脉值 (通用服务ASDU10)
-    virtual void onCounterValue(const CounterPoint& point) {
-        (void)point;
-    }
-
-    // ========== 通用服务回调 ==========
 
     // 通用分类数据 (原始格式)
     virtual void onGenericData(uint16_t deviceAddr, const GenericDataItem& item) {

@@ -161,8 +161,12 @@ namespace IEC103
 
     void TcpTransport::processReceivedData()
     {
-        // 检查是否有完整帧
-        while (m_receiveBuffer.size() >= 5)
+        // 南网规范帧格式 (参照104标准):
+        // 68H | 长度L(2字节) | APCI(4字节) | ASDU
+        // 无校验和，无结束字节
+        
+        // 检查是否有完整帧 (最小帧: 启动(1) + 长度(2) + APCI(4) = 7字节)
+        while (m_receiveBuffer.size() >= 7)
         {
             // 检查帧起始字节
             if (static_cast<uint8_t>(m_receiveBuffer[0]) != FRAME_START_BYTE)
@@ -175,21 +179,13 @@ namespace IEC103
             // 获取帧长度 (APCI + ASDU)
             uint16_t frameLen = static_cast<uint8_t>(m_receiveBuffer[1]) |
                                 (static_cast<uint8_t>(m_receiveBuffer[2]) << 8);
-            // 总长度 = 启动(1) + 长度(2) + APCI+ASDU(frameLen) + 校验(1) + 结束(1) = 5 + frameLen
-            int totalLen = 5 + frameLen;
+            // 总长度 = 启动(1) + 长度(2) + APCI+ASDU(frameLen) = 3 + frameLen
+            int totalLen = 3 + frameLen;
 
             // 检查是否收到完整帧
             if (m_receiveBuffer.size() < totalLen)
             {
                 break; // 数据不完整，等待更多数据
-            }
-
-            // 验证结束字节
-            if (static_cast<uint8_t>(m_receiveBuffer[totalLen - 1]) != FRAME_START_BYTE)
-            {
-                qWarning() << "TcpTransport: Invalid frame end byte, discarding";
-                m_receiveBuffer.remove(0, 1);
-                continue;
             }
 
             // 提取完整帧

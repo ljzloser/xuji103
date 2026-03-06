@@ -1,5 +1,5 @@
 #include <QCoreApplication>
-#include <QCommandLineParser>
+#include <QFile>
 #include <QTimer>
 #include <QDebug>
 #include "Config.h"
@@ -25,8 +25,18 @@ public:
         connect(m_master, &IEC103Master::giFinished, this, &Application::onGIFinished);
     }
 
-    bool init(const QStringList& args) {
-        if (!Config::instance().parseArgs(args)) {
+    bool init() {
+        // 从配置文件加载
+        QString configPath = Config::defaultConfigPath();
+        
+        // 检查配置文件是否存在
+        if (!QFile::exists(configPath)) {
+            qCritical() << "配置文件不存在:" << configPath;
+            qCritical() << "请创建 config.json 配置文件";
+            return false;
+        }
+        
+        if (!Config::instance().loadFromFile(configPath)) {
             return false;
         }
         
@@ -36,6 +46,8 @@ public:
         config.reconnectInterval = Config::instance().reconnectInterval();
         config.timeout = Config::instance().timeout();
         config.testInterval = Config::instance().testInterval();
+        config.maxUnconfirmed = Config::instance().maxUnconfirmed();
+        config.maxAckDelay = Config::instance().maxAckDelay();
         
         m_master->setConfig(config);
         return true;
@@ -47,11 +59,11 @@ public:
         m_master->connectToServer();
     }
 
-    void stop()
-    {
+    void stop() {
         qInfo() << "Disconnecting...";
         m_master->disconnectFromServer();
     }
+
 private slots:
     void onConnected() {
         qInfo() << "Connected! Starting general interrogation...";
@@ -80,32 +92,21 @@ private slots:
     void onGIFinished(uint16_t deviceAddr) {
         qInfo() << "GI finished for device" << deviceAddr;
         
-        // GI完成后，召唤遥测数据
-        readAnalogGroups(deviceAddr);
-        
-        // 召唤遥脉数据
-        readCounterGroups(deviceAddr);
+        // GI完成后，召唤通用服务组（遥测/遥脉统一）
+        readGroups(deviceAddr);
     }
 
-    void readAnalogGroups(uint16_t deviceAddr) {
-        // 召唤遥测组
-        for (int group : Config::instance().analogGroups()) {
-            qInfo() << "Reading analog group" << group;
-            m_master->readGenericGroup(deviceAddr, group);
-        }
-    }
-    
-    void readCounterGroups(uint16_t deviceAddr) {
-        // 召唤遥脉组
-        for (int group : Config::instance().counterGroups()) {
-            qInfo() << "Reading counter group" << group;
-            m_master->readGenericGroup(deviceAddr, group);
+    void readGroups(uint16_t deviceAddr) {
+        // 遍历配置文件中的组列表
+        for (const auto& groupConfig : Config::instance().groups()) {
+            qInfo() << "Reading group" << groupConfig.group << "-" << groupConfig.name;
+            m_master->readGenericGroup(deviceAddr, groupConfig.group);
         }
     }
 
 private:
     IEC103Master* m_master;
-    DataPrinter *m_printer;
+    DataPrinter* m_printer;
 };
 
 int main(int argc, char *argv[])
@@ -115,19 +116,13 @@ int main(int argc, char *argv[])
     QCoreApplication::setApplicationVersion("1.0.0");
 
     Application application;
-    QTimer timer;
 
-    if (!application.init(app.arguments()))
-    {
+    if (!application.init()) {
         return 1;
     }
-    auto quit = [&]()
-    {
-        application.stop();
-    };
-    QObject::connect(&timer, &QTimer::timeout, quit);
+
     application.start();
-    timer.start(30000);  // 30秒后退出，足够完成测试
+    
     return app.exec();
 }
 

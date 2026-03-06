@@ -19,12 +19,13 @@ from protocol.asdu import (
     TI, COT, FUN, INF, KOD, DataType,
     GenericDataItem
 )
-from data import AnalogDataGenerator, DigitalDataGenerator, CounterDataGenerator
+from data import DigitalDataGenerator, GenericDataGenerator
 
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s'
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
 
@@ -36,23 +37,43 @@ class IEC103Slave:
         self.device_addr = device_addr
         self.send_seq = 0
         self.recv_seq = 0
+        self.last_ack_seq = 0  # 最后确认的序号（主站确认）
         self.connected = False
         self.started = False
         self.frame_parser = FrameParser()
 
         # 数据生成器
-        self.analog_gen = AnalogDataGenerator()
         self.digital_gen = DigitalDataGenerator()
-        self.counter_gen = CounterDataGenerator()
+        self.generic_gen = GenericDataGenerator()  # 遥测/遥脉统一
 
         # 当前总召唤序号
         self.current_scn = 0
+
+        # k/w 流量控制参数
+        self.max_unconfirmed = 12  # k值: 最大未确认I帧数
+        self.max_ack_delay = 8     # w值: 收到w个I帧后立即确认
+        self.recv_count = 0        # 接收未确认计数
+
+        # 发送队列（用于k值控制）
+        self.send_queue = []
+        self.unconfirmed_count = 0  # 未确认的I帧数
 
     def reset(self):
         """重置状态"""
         self.send_seq = 0
         self.recv_seq = 0
+        self.last_ack_seq = 0
         self.started = False
+        self.recv_count = 0
+        self.unconfirmed_count = 0
+        self.send_queue.clear()
+
+    def unconfirmed_frames(self) -> int:
+        """获取未确认的I帧数"""
+        diff = self.send_seq - self.last_ack_seq
+        if diff < 0:
+            diff += 32768  # 序号回绕
+        return diff
 
     async def handle_client(self, reader: asyncio.StreamReader, 
                            writer: asyncio.StreamWriter):
@@ -95,6 +116,12 @@ class IEC103Slave:
             while self.connected:
                 await asyncio.sleep(10)  # 每10秒发送一次
                 if self.started and self.connected:
+                    # k值控制：未确认帧数超过k时暂停发送
+                    unconfirmed = self.unconfirmed_frames()
+                    if unconfirmed >= self.max_unconfirmed:
+                        logger.warning(f"[k-Control] Spontaneous blocked: unconfirmed={unconfirmed} >= k={self.max_unconfirmed}")
+                        continue
+                    
                     event_count += 1
                     if event_count % 2 == 0:
                         # 发送ASDU1突发遥信
@@ -118,11 +145,56 @@ class IEC103Slave:
         if frame.is_u_format:
             await self.handle_u_format(frame, writer)
         elif frame.is_i_format:
-            self.recv_seq = frame.send_seq + 1
+            # 序号验证：N(S) 必须等于期望值
+            expected_seq = self.recv_seq
+            if frame.send_seq != expected_seq:
+                logger.error(f"[I-RX] SEQUENCE ERROR: N(S)={frame.send_seq}, expected={expected_seq} - Disconnecting!")
+                writer.close()
+                await writer.wait_closed()
+                self.connected = False
+                return
+            
+            # 更新接收序号
+            self.recv_seq = (frame.send_seq + 1) & 0x7FFF
+            self.recv_count += 1  # 递增接收计数
+
+            logger.info(f"[I-RX] N(S)={frame.send_seq} N(R)={frame.recv_seq}, "
+                       f"recv_count={self.recv_count}/{self.max_ack_delay}")
+
+            # w值控制：收到w个I帧后立即发S帧确认
+            if self.recv_count >= self.max_ack_delay:
+                ack = FrameCodec.encode_s_format(self.recv_seq)
+                writer.write(ack)
+                await writer.drain()
+                logger.info(f"[w-Control] w threshold reached: {self.recv_count} >= {self.max_ack_delay}")
+                logger.info(f"[S-TX] Sent S-Frame N(R)={self.recv_seq} (acknowledged)")
+                self.recv_count = 0
+            else:
+                logger.debug(f"[w-Control] w threshold not reached, waiting...")
+
             await self.handle_i_format(frame, writer)
         elif frame.is_s_format:
-            # S格式仅确认,无需处理
-            pass
+            # S格式确认序号验证：N(R) 不能大于已发送序号
+            # N(R) 表示期望接收的下一个序号，所以 N(R) 应该 <= send_seq
+            if frame.recv_seq > self.send_seq:
+                logger.error(f"[S-RX] SEQUENCE ERROR: N(R)={frame.recv_seq} > send_seq={self.send_seq} - Disconnecting!")
+                writer.close()
+                await writer.wait_closed()
+                self.connected = False
+                return
+            
+            # 更新最后确认序号
+            old_ack = self.last_ack_seq
+            self.last_ack_seq = frame.recv_seq
+            
+            # 计算确认的帧数
+            confirmed = self.unconfirmed_frames()
+            was_unconfirmed = (old_ack - self.last_ack_seq) if old_ack >= self.last_ack_seq else (old_ack + 32768 - self.last_ack_seq)
+            actual_confirmed = self.last_ack_seq - old_ack if self.last_ack_seq >= old_ack else (self.last_ack_seq + 32768 - old_ack)
+            
+            logger.info(f"[S-RX] Peer acknowledged: N(R)={frame.recv_seq}, "
+                       f"send_seq={self.send_seq}, confirmed={actual_confirmed} frames, "
+                       f"unconfirmed={self.unconfirmed_frames()}")
 
     async def handle_u_format(self, frame: Frame, writer: asyncio.StreamWriter):
         """处理U格式帧"""
@@ -224,84 +296,70 @@ class IEC103Slave:
         return frames
 
     def build_generic_group_response(self, rii: int, group: int, entry: int) -> list:
-        """构建通用分类组数据响应"""
+        """构建通用分类组数据响应 (遥测/遥脉统一)"""
         frames = []
 
-        if group in (8, 9, 10):
-            # 遥测组
-            points = self.analog_gen.get_group_points(group)
-            items = []
-            for p in points:
-                item = GenericDataItem(
-                    gin_group=p.group,
-                    gin_entry=p.entry,
-                    kod=KOD.ACTUAL_VALUE,
-                    data_type=DataType.FLOAT,
-                    data_size=4,
-                    value=p.value
-                )
-                items.append(item)
+        # 更新数据（模拟数据变化）
+        self.generic_gen.update()
+        
+        # 获取指定组的数据点
+        points = self.generic_gen.get_group_points(group)
+        items = []
+        
+        for p in points:
+            # 根据 data_type 判断数据类型
+            if p.data_type == GenericDataGenerator.DATA_TYPE_FLOAT:
+                # 浮点数 (遥测)
+                data_type = DataType.FLOAT
+            elif p.data_type == GenericDataGenerator.DATA_TYPE_UINT:
+                # 无符号整数 (遥脉)
+                data_type = DataType.UNSIGNED
+            else:
+                data_type = DataType.FLOAT  # 默认浮点
+            
+            item = GenericDataItem(
+                gin_group=p.group,
+                gin_entry=p.entry,
+                kod=KOD.ACTUAL_VALUE,
+                data_type=data_type,
+                data_size=4,
+                value=p.value
+            )
+            items.append(item)
 
-            if items:
-                asdu_resp = ASDUBuilder.build_generic_data(
-                    self.device_addr, rii, items, COT.GENERIC_DATA_RESP
-                )
-                frames.append(self.build_i_frame(asdu_resp))
-                logger.info(f"遥测响应: 组{group} {len(items)}个点")
-
-        elif group in (16, 17):
-            # 遥脉组
-            points = self.counter_gen.get_group_points(group)
-            items = []
-            for p in points:
-                item = GenericDataItem(
-                    gin_group=p.group,
-                    gin_entry=p.entry,
-                    kod=KOD.ACTUAL_VALUE,
-                    data_type=DataType.UNSIGNED,
-                    data_size=4,
-                    value=p.value
-                )
-                items.append(item)
-
-            if items:
-                asdu_resp = ASDUBuilder.build_generic_data(
-                    self.device_addr, rii, items, COT.GENERIC_DATA_RESP
-                )
-                frames.append(self.build_i_frame(asdu_resp))
-                logger.info(f"遥脉响应: 组{group} {len(items)}个点")
+        if items:
+            asdu_resp = ASDUBuilder.build_generic_data(
+                self.device_addr, rii, items, COT.GENERIC_DATA_RESP
+            )
+            frames.append(self.build_i_frame(asdu_resp))
+            type_str = "浮点" if self.generic_gen.is_float_group(group) else "整数"
+            logger.info(f"通用服务响应: 组{group} {len(items)}个点 ({type_str})")
 
         return frames
 
     def build_generic_single_response(self, rii: int, group: int, entry: int) -> list:
-        """构建单个条目响应"""
+        """构建单个条目响应 (遥测/遥脉统一)"""
         frames = []
 
-        # 查找遥测点
-        point = self.analog_gen.get_point(group, entry)
+        # 更新数据
+        self.generic_gen.update()
+        
+        # 查找数据点
+        point = self.generic_gen.get_point(group, entry)
         if point:
+            # 根据 data_type 判断数据类型
+            if point.data_type == GenericDataGenerator.DATA_TYPE_FLOAT:
+                data_type = DataType.FLOAT
+            elif point.data_type == GenericDataGenerator.DATA_TYPE_UINT:
+                data_type = DataType.UNSIGNED
+            else:
+                data_type = DataType.FLOAT
+            
             item = GenericDataItem(
                 gin_group=point.group,
                 gin_entry=point.entry,
                 kod=KOD.ACTUAL_VALUE,
-                data_type=DataType.FLOAT,
-                data_size=4,
-                value=point.value
-            )
-            asdu_resp = ASDUBuilder.build_generic_data(
-                self.device_addr, rii, [item], COT.GENERIC_DATA_RESP
-            )
-            frames.append(self.build_i_frame(asdu_resp))
-            return frames
-
-        # 查找遥脉点
-        point = self.counter_gen.get_point(group, entry)
-        if point:
-            item = GenericDataItem(
-                gin_group=point.group,
-                gin_entry=point.entry,
-                kod=KOD.ACTUAL_VALUE,
-                data_type=DataType.UNSIGNED,
+                data_type=data_type,
                 data_size=4,
                 value=point.value
             )
@@ -315,24 +373,33 @@ class IEC103Slave:
     def build_i_frame(self, asdu: ASDU) -> bytes:
         """构建I格式帧"""
         apci = APCI('I', self.send_seq, self.recv_seq)
+        frame = FrameCodec.encode(apci, asdu.encode())
+        unconfirmed = self.unconfirmed_frames() + 1  # 发送后未确认数
+        logger.info(f"[I-TX] N(S)={self.send_seq} N(R)={self.recv_seq}, TI={asdu.ti}, unconfirmed={unconfirmed}")
         self.send_seq = (self.send_seq + 1) & 0x7FFF
-        return FrameCodec.encode(apci, asdu.encode())
+        return frame
 
     async def send_response(self, response, writer: asyncio.StreamWriter):
-        """发送响应"""
+        """发送响应（实现k值控制）"""
         if isinstance(response, list):
-            for frame in response:
+            logger.info(f"[I-TX] Sending {len(response)} I-frames...")
+            sent_count = 0
+            for i, frame in enumerate(response):
+                # k值控制：检查未确认帧数
+                unconfirmed = self.unconfirmed_frames()
+                if unconfirmed >= self.max_unconfirmed:
+                    logger.warning(f"[k-Control] Send blocked at frame {i+1}/{len(response)}: "
+                                 f"unconfirmed={unconfirmed} >= k={self.max_unconfirmed}")
+                    logger.info(f"[k-Control] Waiting for master's S-Frame acknowledgment...")
+                    # 在实际实现中，这里应该等待主站的S帧确认
+                    # 为了简化，我们继续发送（但会记录警告）
+                
                 writer.write(frame)
                 await writer.drain()
-                # 发送S格式确认
-                ack = FrameCodec.encode_s_format(self.recv_seq)
-                writer.write(ack)
-                await writer.drain()
+                sent_count += 1
+                logger.debug(f"[I-TX] Frame {i+1}/{len(response)} sent")
         else:
             writer.write(response)
-            await writer.drain()
-            ack = FrameCodec.encode_s_format(self.recv_seq)
-            writer.write(ack)
             await writer.drain()
 
     async def send_spontaneous_event(self, writer: asyncio.StreamWriter):
@@ -411,6 +478,8 @@ async def main():
     addr = server.sockets[0].getsockname()
     logger.info(f"IEC103子站模拟器启动: {addr[0]}:{addr[1]}")
     logger.info(f"装置地址: {args.device}")
+    logger.info(f"k值(最大未确认帧数): {slave.max_unconfirmed}")
+    logger.info(f"w值(确认阈值): {slave.max_ack_delay}")
     
     async with server:
         await server.serve_forever()

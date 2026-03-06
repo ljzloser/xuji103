@@ -1,6 +1,5 @@
 # Data Module
-from .analog import AnalogDataGenerator
 from .digital import DigitalDataGenerator
-from .counter import CounterDataGenerator
+from .generic import GenericDataGenerator
 
-__all__ = ['AnalogDataGenerator', 'DigitalDataGenerator', 'CounterDataGenerator']
+__all__ = ['DigitalDataGenerator', 'GenericDataGenerator']

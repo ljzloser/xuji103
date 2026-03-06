@@ -13,6 +13,7 @@ void SeqManager::reset() {
     m_sendSeq = 0;
     m_recvSeq = 0;
     m_lastAckSeq = 0;
+    m_recvCount = 0;
 }
 
 uint16_t SeqManager::sendSeq() const {
@@ -88,6 +89,21 @@ bool SeqManager::needSendAck() const {
 
 bool SeqManager::hasUnconfirmed() const {
     return unconfirmedCount() > 0;
+}
+
+uint8_t SeqManager::recvCount() const {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    return m_recvCount;
+}
+
+void SeqManager::incrementRecvCount() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_recvCount++;
+}
+
+void SeqManager::resetRecvCount() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_recvCount = 0;
 }
 
 } // namespace IEC103

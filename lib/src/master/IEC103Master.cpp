@@ -93,21 +93,33 @@ void IEC103Master::generalInterrogation(uint16_t deviceAddr)
         Logger::warning("Cannot send GI, not connected");
         return;
     }
-    
+
+    // k值控制：未确认帧数超过k时暂停发送
+    uint16_t unconfirmed = m_seqManager.unconfirmedCount();
+    if (unconfirmed >= m_config.maxUnconfirmed) {
+        Logger::warning(QString("[k-Control] Send blocked: unconfirmed=%1 >= k=%2")
+                        .arg(unconfirmed).arg(m_config.maxUnconfirmed));
+        return;
+    }
+    Logger::debug(QString("[k-Control] Before send: unconfirmed=%1, k=%2")
+                  .arg(unconfirmed).arg(m_config.maxUnconfirmed));
+
     Asdu asdu = Asdu7Builder::build(deviceAddr, m_giState.scn);
     QByteArray asduData = asdu.encode();
-    
+
     uint16_t sendSeq = m_seqManager.nextSendSeq();
     uint16_t recvSeq = m_seqManager.recvSeq();
     Frame frame = FrameCodec::createIFrame(sendSeq, recvSeq, asduData);
-    
+
     m_giState.inProgress = true;
     m_giState.deviceAddr = deviceAddr;
     m_giState.scn++;
-    
+
     sendFrame(frame);
-    Logger::info(QString("Sent GI to device %1, SCN=%2").arg(deviceAddr).arg(m_giState.scn));
-    
+    Logger::info(QString("[I-TX] GI cmd N(S)=%1 N(R)=%2, Dev=%3 SCN=%4, unconfirmed=%5")
+                 .arg(sendSeq).arg(recvSeq).arg(deviceAddr).arg(m_giState.scn)
+                 .arg(m_seqManager.unconfirmedCount()));
+
     if (m_handler) {
         m_handler->onGIStarted(deviceAddr);
     }
@@ -118,20 +130,32 @@ void IEC103Master::readGenericGroup(uint16_t deviceAddr, uint8_t group)
         Logger::warning("Cannot read generic group, not connected");
         return;
     }
-    
+
+    // k值控制：未确认帧数超过k时暂停发送
+    uint16_t unconfirmed = m_seqManager.unconfirmedCount();
+    if (unconfirmed >= m_config.maxUnconfirmed) {
+        Logger::warning(QString("[k-Control] Send blocked: unconfirmed=%1 >= k=%2")
+                        .arg(unconfirmed).arg(m_config.maxUnconfirmed));
+        return;
+    }
+    Logger::debug(QString("[k-Control] Before send: unconfirmed=%1, k=%2")
+                  .arg(unconfirmed).arg(m_config.maxUnconfirmed));
+
     Asdu asdu = Asdu21Builder::buildReadGroup(deviceAddr, group, KOD::ActualValue);
     QByteArray asduData = asdu.encode();
-    
+
     uint16_t sendSeq = m_seqManager.nextSendSeq();
     uint16_t recvSeq = m_seqManager.recvSeq();
     Frame frame = FrameCodec::createIFrame(sendSeq, recvSeq, asduData);
-    
+
     m_genericState.inProgress = true;
     m_genericState.deviceAddr = deviceAddr;
     m_genericState.group = group;
-    
+
     sendFrame(frame);
-    Logger::info(QString("Sent read group %1 to device %2").arg(group).arg(deviceAddr));
+    Logger::info(QString("[I-TX] ReadGroup N(S)=%1 N(R)=%2, Dev=%3 Group=%4, unconfirmed=%5")
+                 .arg(sendSeq).arg(recvSeq).arg(deviceAddr).arg(group)
+                 .arg(m_seqManager.unconfirmedCount()));
 }
 void IEC103Master::startPeriodicGI(int intervalMs)
 {
@@ -156,6 +180,7 @@ void IEC103Master::onDisconnected()
     Logger::info("Disconnected");
     setState(LinkState::Disconnected);
     m_startDtReceived = false;
+    m_testFrPending = false;  // 重置 TESTFR 状态
     stopTestTimer();
     stopAckTimer();
     
@@ -187,10 +212,18 @@ void IEC103Master::onDataReceived(const QByteArray& data)
 }
 void IEC103Master::onTestTimeout()
 {
+    // 检查上次 TESTFR 是否收到确认
+    if (m_testFrPending) {
+        Logger::error("[TESTFR] No confirmation received within timeout - Disconnecting!");
+        disconnectFromServer();
+        return;
+    }
+    
     Logger::debug("Sending TESTFR");
     Frame testFr = FrameCodec::createUFrame(UControl::TestFrAct);
     sendFrame(testFr);
-    startTestTimer();
+    m_testFrPending = true;
+    startTestTimer();  // T1 超时等待确认
 }
 void IEC103Master::onAckTimeout()
 {
@@ -222,18 +255,46 @@ void IEC103Master::processIFrame(const Frame& frame)
 {
     uint16_t recvSeq = frame.sendSeq();
     if (!m_seqManager.validateRecvSeq(recvSeq)) {
-        Logger::warning(QString("Invalid receive sequence: %1, expected: %2")
-                        .arg(recvSeq).arg(m_seqManager.recvSeq()));
+        Logger::error(QString("[I-RX] SEQUENCE ERROR: N(S)=%1, expected=%2 - Disconnecting!")
+                      .arg(recvSeq).arg(m_seqManager.recvSeq()));
+        // 根据IEC 104协议，序号错误表示可能丢帧或重复，应断开重连
+        disconnectFromServer();
+        return;
     }
     m_seqManager.nextRecvSeq();
-    
+
     uint16_t ackSeq = frame.recvSeq();
+    uint16_t prevAck = m_seqManager.lastAckSeq();
     m_seqManager.setLastAckSeq(ackSeq);
-    
-    startAckTimer();
-    
+
+    // w值控制：收到w个I帧后立即发S帧确认
+    m_seqManager.incrementRecvCount();
+    uint8_t recvCount = m_seqManager.recvCount();
+    Logger::info(QString("[w-Control] I-Frame #%1 received, w=%2, threshold=%3")
+                  .arg(recvCount).arg(m_config.maxAckDelay)
+                  .arg(recvCount >= m_config.maxAckDelay ? "REACHED" : "not reached"));
+
+    if (recvCount >= m_config.maxAckDelay) {
+        Logger::info(QString("[w-Control] >>> SENDING S-FRIME NOW (w=%1 reached) <<<")
+                     .arg(m_config.maxAckDelay));
+        sendAck();
+        m_seqManager.resetRecvCount();
+        stopAckTimer();
+    } else {
+        startAckTimer();  // T2兜底
+    }
+
+    // 打印确认信息
+    if (ackSeq > prevAck || (ackSeq == 0 && prevAck > 30000)) {
+        uint16_t confirmedCount = (ackSeq - prevAck) & 0x7FFF;
+        Logger::debug(QString("[I-RX] Peer confirmed: N(R)=%1, confirmed %2 frames, unconfirmed=%3")
+                      .arg(ackSeq).arg(confirmedCount).arg(m_seqManager.unconfirmedCount()));
+    }
+
     Asdu asdu;
     if (asdu.parse(frame.asdu())) {
+        Logger::debug(QString("[I-RX] ASDU TI=%1 COT=%2 Addr=%3")
+                      .arg(asdu.ti()).arg(asdu.cot()).arg(asdu.addr()));
         processAsdu(asdu);
     } else {
         Logger::warning("Failed to parse ASDU");
@@ -242,8 +303,28 @@ void IEC103Master::processIFrame(const Frame& frame)
 void IEC103Master::processSFrame(const Frame& frame)
 {
     uint16_t ackSeq = frame.recvSeq();
+    uint16_t sendSeq = m_seqManager.sendSeq();
+    
+    // 验证：N(R) 不能大于已发送序号
+    // 注意：sendSeq 是下一个要发送的序号，所以 N(R) 应该 <= sendSeq
+    if (ackSeq > sendSeq) {
+        Logger::error(QString("[S-RX] SEQUENCE ERROR: N(R)=%1 > sendSeq=%2 - Disconnecting!")
+                      .arg(ackSeq).arg(sendSeq));
+        disconnectFromServer();
+        return;
+    }
+    
+    uint16_t prevAck = m_seqManager.lastAckSeq();
     m_seqManager.setLastAckSeq(ackSeq);
-    Logger::debug(QString("Received S-frame, ack=%1").arg(ackSeq));
+
+    uint16_t confirmedCount = 0;
+    if (ackSeq >= prevAck) {
+        confirmedCount = ackSeq - prevAck;
+    } else {
+        confirmedCount = (ackSeq + 32768) - prevAck;  // 序号回绕
+    }
+    Logger::info(QString("[S-RX] Ack received: N(R)=%1, confirmed %2 frames, unconfirmed=%3")
+                 .arg(ackSeq).arg(confirmedCount).arg(m_seqManager.unconfirmedCount()));
 }
 void IEC103Master::processUFrame(const Frame& frame)
 {
@@ -269,7 +350,8 @@ void IEC103Master::processUFrame(const Frame& frame)
         sendFrame(testFrCon);
     } else if (frame.isTestFrCon()) {
         Logger::debug("Received TESTFR con");
-        startTestTimer();
+        m_testFrPending = false;  // 清除等待确认标志
+        startTestTimer();         // 重新开始 T3 计时
     }
 }
 void IEC103Master::processAsdu(const Asdu& asdu)
@@ -356,35 +438,36 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
         uint16_t deviceAddr = asdu.addr();
         
         for (const auto& item : parser.data().items) {
+            // 创建统一的GenericPoint
+            GenericPoint point;
+            point.deviceAddr = deviceAddr;
+            point.group = item.gin.group;
+            point.entry = item.gin.entry;
+            point.dataType = item.gdd.dataType;
+            
+            // 根据dataType解析值
             if (item.gdd.dataType == static_cast<uint8_t>(DataType::R32_23)) {
-                float value = item.toFloat();
-                Logger::info(QString("Analog: Dev=%1 Group=%2 Entry=%3 Value=%4")
-                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry).arg(value));
-                
-                if (m_handler) {
-                    AnalogPoint point;
-                    point.deviceAddr = deviceAddr;
-                    point.group = item.gin.group;
-                    point.entry = item.gin.entry;
-                    point.value = value;
-                    m_handler->onAnalogValue(point);
-                }
+                // 浮点数 (遥测)
+                point.value = item.toFloat();
+                Logger::info(QString("Generic(float): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=7")
+                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                            .arg(point.toFloat()));
             } else if (item.gdd.dataType == static_cast<uint8_t>(DataType::UI)) {
-                uint32_t value = item.toUInt32();
-                Logger::info(QString("Counter: Dev=%1 Group=%2 Entry=%3 Value=%4")
-                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry).arg(value));
-                
-                if (m_handler) {
-                    CounterPoint point;
-                    point.deviceAddr = deviceAddr;
-                    point.group = item.gin.group;
-                    point.entry = item.gin.entry;
-                    point.value = value;
-                    m_handler->onCounterValue(point);
-                }
+                // 无符号整数 (遥脉)
+                point.value = item.toUInt32();
+                Logger::info(QString("Generic(uint): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=3")
+                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                            .arg(point.toUInt32()));
+            } else {
+                // 其他类型
+                Logger::info(QString("Generic(other): Dev=%1 Group=%2 Entry=%3 DataType=%4")
+                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                            .arg(item.gdd.dataType));
             }
             
+            // 统一回调
             if (m_handler) {
+                m_handler->onGenericValue(point);
                 m_handler->onGenericData(deviceAddr, item);
             }
         }
@@ -435,7 +518,9 @@ void IEC103Master::sendAck()
     uint16_t recvSeq = m_seqManager.recvSeq();
     Frame sFrame = FrameCodec::createSFrame(recvSeq);
     sendFrame(sFrame);
-    Logger::debug(QString("Sent S-frame with N(R)=%1").arg(recvSeq));
+    m_seqManager.resetRecvCount();  // 发送确认后重置接收计数
+    Logger::info(QString("[S-TX] Sent S-Frame N(R)=%1 (acknowledged peer's I-frames)")
+                 .arg(recvSeq));
 }
 void IEC103Master::startTestTimer()
 {

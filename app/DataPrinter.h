@@ -15,11 +15,15 @@ public:
     void onDisconnected() override;
     void onError(const QString& error) override;
     void onLinkStateChanged(IEC103::LinkState state) override;
+    
+    // 遥信回调
     void onDoublePoint(const IEC103::DigitalPoint& point) override;
-    void onAnalogValue(const IEC103::AnalogPoint& point) override;
-    void onCounterValue(const IEC103::CounterPoint& point) override;
+    
+    // 通用服务回调 (遥测/遥脉统一)
+    void onGenericValue(const IEC103::GenericPoint& point) override;
     void onGenericData(uint16_t deviceAddr, const IEC103::GenericDataItem& item) override;
     
+    // 总召唤回调
     void onGIStarted(uint16_t deviceAddr) override;
     void onGICompleted(uint16_t deviceAddr) override;
 

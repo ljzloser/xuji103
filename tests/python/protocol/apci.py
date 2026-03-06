@@ -82,9 +82,12 @@ class FrameCodec:
     def parse(data: bytes) -> Tuple[APCI, bytes]:
         """
         解析完整APDU帧
+        南网规范帧格式 (参照104标准):
+        68H | 长度L(2字节) | APCI(4字节) | ASDU
+        无校验和，无结束字节
         返回: (APCI, ASDU数据)
         """
-        if len(data) < 6:
+        if len(data) < 7:
             raise ValueError("帧数据太短")
         
         if data[0] != FrameCodec.START_BYTE:
@@ -93,19 +96,9 @@ class FrameCodec:
         # 长度域 (2字节) - APCI + ASDU的总长度
         length = data[1] | (data[2] << 8)
         
-        # 总帧长 = 启动(1) + 长度(2) + APCI+ASDU(length) + 校验(1) + 结束(1) = 5 + length
-        if len(data) < length + 5:
-            raise ValueError(f"帧数据不完整: 期望{length + 5}字节, 实际{len(data)}字节")
-        
-        # 校验和 (计算APCI + ASDU，从索引3开始)
-        cs = data[length + 3]
-        expected_cs = sum(data[3:length + 3]) & 0xFF
-        if cs != expected_cs:
-            raise ValueError(f"校验和错误: 计算值{expected_cs:02X}, 实际值{cs:02X}")
-        
-        # 结束字节
-        if data[length + 4] != FrameCodec.START_BYTE:
-            raise ValueError(f"无效结束字节: {data[length + 4]:02X}")
+        # 南网规范: 总帧长 = 启动(1) + 长度(2) + APCI+ASDU(length) = 3 + length
+        if len(data) < length + 3:
+            raise ValueError(f"帧数据不完整: 期望{length + 3}字节, 实际{len(data)}字节")
         
         # 解析APCI
         apci = APCI.parse(data[3:7])
@@ -119,22 +112,20 @@ class FrameCodec:
     def encode(apci: APCI, asdu: bytes = b'') -> bytes:
         """
         编码完整APDU帧
+        南网规范帧格式 (参照104标准):
+        68H | 长度L(2字节) | APCI(4字节) | ASDU
+        无校验和，无结束字节
         """
         apci_data = apci.encode()
         length = len(apci_data) + len(asdu)
         
-        # 启动字节 + 长度域(2字节) + APCI + ASDU + 校验和 + 结束字节
+        # 启动字节 + 长度域(2字节) + APCI + ASDU
         frame = bytearray()
         frame.append(FrameCodec.START_BYTE)
         frame.append(length & 0xFF)
         frame.append((length >> 8) & 0xFF)
         frame.extend(apci_data)
         frame.extend(asdu)
-        
-        # 校验和 (计算APCI + ASDU，从索引3开始)
-        cs = sum(frame[3:]) & 0xFF
-        frame.append(cs)
-        frame.append(FrameCodec.START_BYTE)
         
         return bytes(frame)
     

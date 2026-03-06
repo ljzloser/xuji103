@@ -109,6 +109,7 @@ private:
 
     LinkState m_state = LinkState::Disconnected;
     bool m_startDtReceived = false;
+    bool m_testFrPending = false;      // TESTFR等待确认标志
 
     QTimer* m_testTimer;
     QTimer* m_ackTimer;

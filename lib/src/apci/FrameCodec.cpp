@@ -7,11 +7,13 @@ namespace IEC103 {
 // ========== Frame 实现 ==========
 
 Frame::Frame(const QByteArray& data) : m_apci{}, m_asdu{} {
-    // 帧结构: 启动(1) + 长度(2) + APCI(4) + ASDU + 校验(1) + 结束(1)
-    if (data.size() >= 5 && static_cast<uint8_t>(data[0]) == FRAME_START_BYTE) {
+    // 南网规范帧格式 (参照104标准):
+    // 68H | 长度L(2字节) | APCI(4字节) | ASDU
+    // 无校验和，无结束字节
+    if (data.size() >= 7 && static_cast<uint8_t>(data[0]) == FRAME_START_BYTE) {
         uint16_t len = static_cast<uint8_t>(data[1]) | (static_cast<uint8_t>(data[2]) << 8);
-        // 总长度 = 5 + len
-        if (data.size() >= static_cast<int>(5 + len)) {
+        // 总长度 = 3 + len (启动1 + 长度2 + APCI+ASDU)
+        if (data.size() >= static_cast<int>(3 + len)) {
             // 解析APCI (索引3-6)
             m_apci.byte1 = static_cast<uint8_t>(data[3]);
             m_apci.byte2 = static_cast<uint8_t>(data[4]);
@@ -114,6 +116,9 @@ QByteArray Frame::encode() const {
     QByteArray result;
     uint16_t len = APCI_LENGTH + static_cast<uint16_t>(m_asdu.size());
 
+    // 南网规范帧格式 (参照104标准):
+    // 68H | 长度L(2字节) | APCI(4字节) | ASDU
+    // 无校验和，无结束字节
     result.append(static_cast<char>(FRAME_START_BYTE));
     result.append(static_cast<char>(len & 0xFF));
     result.append(static_cast<char>((len >> 8) & 0xFF));
@@ -124,14 +129,6 @@ QByteArray Frame::encode() const {
     result.append(static_cast<char>(m_apci.byte4));
 
     result.append(m_asdu);
-
-    // 计算校验和 (从APCI开始，索引3)
-    uint8_t cs = FrameCodec::calculateChecksum(
-        reinterpret_cast<const uint8_t*>(result.constData() + 3), len);
-    result.append(static_cast<char>(cs));
-    
-    // 结束字节
-    result.append(static_cast<char>(FRAME_START_BYTE));
 
     return result;
 }
@@ -164,20 +161,11 @@ Frame FrameCodec::decode(const uint8_t* data, size_t len) {
         return Frame();
     }
 
+    // 南网规范帧格式 (参照104标准):
+    // 68H | 长度L(2字节) | APCI(4字节) | ASDU
+    // 无校验和，无结束字节
     uint16_t frameLen = getFrameLength(data);
-    size_t totalLen = 5 + frameLen;
-
-    // 验证校验和
-    if (!verifyChecksum(data, totalLen)) {
-        qWarning() << "Frame checksum verification failed";
-        return Frame();
-    }
-
-    // 验证结束字节
-    if (data[4 + frameLen] != FRAME_START_BYTE) {
-        qWarning() << "Invalid end byte";
-        return Frame();
-    }
+    size_t totalLen = 3 + frameLen;  // 启动(1) + 长度(2) + APCI+ASDU(frameLen)
 
     QByteArray frameData(reinterpret_cast<const char*>(data), static_cast<int>(totalLen));
     return Frame(frameData);
@@ -235,12 +223,13 @@ uint16_t FrameCodec::getFrameLength(const QByteArray& data) {
 }
 
 bool FrameCodec::isCompleteFrame(const uint8_t* data, size_t len) {
-    if (!data || len < 6) return false;
+    if (!data || len < 7) return false;  // 最小帧: 68H + L(2) + APCI(4) = 7字节
     if (data[0] != FRAME_START_BYTE) return false;
 
     uint16_t frameLen = getFrameLength(data);
-    // 总长度 = 启动(1) + 长度(2) + APCI+ASDU(frameLen) + 校验(1) + 结束(1) = 5 + frameLen
-    size_t totalLen = 5 + frameLen;
+    // 南网规范帧格式 (参照104标准):
+    // 总长度 = 启动(1) + 长度(2) + APCI+ASDU(frameLen) = 3 + frameLen
+    size_t totalLen = 3 + frameLen;
 
     return len >= totalLen;
 }

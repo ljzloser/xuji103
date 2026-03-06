@@ -58,9 +58,16 @@ constexpr uint8_t INF_READ_ENTRY_DIR_RESP = 0xF3;
 constexpr uint8_t INF_READ_ENTRY_VALUE_RESP = 0xF4;
 constexpr uint8_t INF_GI_GENERIC_TERM = 0xF5;      // 通用分类数据总召唤中止
 
-// 遥测/遥脉组号 (典型值，实际由子站配置决定)
-constexpr uint8_t GROUP_ANALOG = 0x08;              // 模拟量组(遥测)
-constexpr uint8_t GROUP_COUNTER = 0x10;             // 积分总量组(遥脉)
+// 通用服务数据类型 (GDD.DataType)
+// 数据类型由响应报文中的GDD.DataType决定
+constexpr uint8_t DATA_TYPE_FLOAT = 7;       // R32.23浮点数 (遥测)
+constexpr uint8_t DATA_TYPE_UINT = 3;        // 无符号整数 (遥脉)
+constexpr uint8_t DATA_TYPE_INT = 5;         // 有符号整数
+constexpr uint8_t DATA_TYPE_ASCII = 1;       // ASCII字符串
+
+// 组号说明：
+// 组号由子站配置决定，不再硬编码
+// 通过配置文件或读取子站配置获取
 
 // 总召唤扫描序号
 constexpr uint8_t GI_SCN_DEFAULT = 0x01;

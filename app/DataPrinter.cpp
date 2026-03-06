@@ -2,6 +2,12 @@
 #include <QDebug>
 #include <QDateTime>
 
+namespace {
+    QString ts() {
+        return QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
+    }
+}
+
 DataPrinter::DataPrinter(QObject* parent)
     : QObject(parent)
 {
@@ -9,17 +15,17 @@ DataPrinter::DataPrinter(QObject* parent)
 
 void DataPrinter::onConnected()
 {
-    qInfo() << "[EVENT] Connected";
+    qInfo().noquote() << QString("[%1] [EVENT] Connected").arg(ts());
 }
 
 void DataPrinter::onDisconnected()
 {
-    qInfo() << "[EVENT] Disconnected";
+    qInfo().noquote() << QString("[%1] [EVENT] Disconnected").arg(ts());
 }
 
 void DataPrinter::onError(const QString& error)
 {
-    qWarning() << "[ERROR]" << error;
+    qWarning().noquote() << QString("[%1] [ERROR] %2").arg(ts(), error);
 }
 
 void DataPrinter::onLinkStateChanged(IEC103::LinkState state)
@@ -48,7 +54,7 @@ void DataPrinter::onLinkStateChanged(IEC103::LinkState state)
             stateStr = "Unknown";
             break;
     }
-    qInfo() << "[STATE]" << stateStr;
+    qInfo().noquote() << QString("[%1] [STATE] %2").arg(ts(), stateStr);
 }
 
 void DataPrinter::onDoublePoint(const IEC103::DigitalPoint& point)
@@ -72,51 +78,65 @@ void DataPrinter::onDoublePoint(const IEC103::DigitalPoint& point)
             break;
     }
 
-    qInfo() << "[DIGITAL] Dev=" << point.deviceAddr
-            << "FUN=" << QString::number(point.fun, 16).toUpper()
-            << "INF=" << QString::number(point.inf, 16).toUpper()
-            << "Value=" << valueStr
-            << "Quality=" << formatQuality(point.quality)
-            << "EventTime=" << point.eventTime.toString("yyyy-MM-dd hh:mm:ss.zzz")
-            << "RecvTime=" << point.recvTime.toString("yyyy-MM-dd hh:mm:ss.zzz");
+    qInfo().noquote() << QString("[%1] [DIGITAL] Dev=%2 FUN=%3 INF=%4 Value=%5 Quality=%6 EventTime=%7 RecvTime=%8")
+        .arg(ts())
+        .arg(point.deviceAddr)
+        .arg(QString::number(point.fun, 16).toUpper())
+        .arg(QString::number(point.inf, 16).toUpper())
+        .arg(valueStr)
+        .arg(formatQuality(point.quality))
+        .arg(point.eventTime.toString("yyyy-MM-dd hh:mm:ss.zzz"))
+        .arg(point.recvTime.toString("yyyy-MM-dd hh:mm:ss.zzz"));
 }
 
-void DataPrinter::onAnalogValue(const IEC103::AnalogPoint& point)
+void DataPrinter::onGenericValue(const IEC103::GenericPoint& point)
 {
-    qInfo() << "[ANALOG] Dev=" << point.deviceAddr
-            << "Group=" << point.group
-            << "Entry=" << point.entry
-            << "Value=" << point.value
-            << "Quality=" << formatQuality(point.quality)
-            << "Time=" << point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz");
-}
-
-void DataPrinter::onCounterValue(const IEC103::CounterPoint& point)
-{
-    qInfo() << "[COUNTER] Dev=" << point.deviceAddr
-            << "Group=" << point.group
-            << "Entry=" << point.entry
-            << "Value=" << point.value
-            << "Quality=" << formatQuality(point.quality)
-            << "Time=" << point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz");
+    // 根据数据类型格式化值
+    QString typeStr;
+    QString valueStr;
+    
+    if (point.isFloat()) {
+        typeStr = "浮点";
+        valueStr = QString::number(point.toFloat(), 'f', 2);
+    } else if (point.isInteger()) {
+        typeStr = "整数";
+        valueStr = QString::number(point.toUInt32());
+    } else {
+        typeStr = QString("类型%1").arg(point.dataType);
+        valueStr = point.valueString();
+    }
+    
+    qInfo().noquote() << QString("[%1] [GENERIC] Dev=%2 Group=%3 Entry=%4 Value=%5 Unit=%6 Type=%7 Quality=%8 Desc=%9")
+        .arg(ts())
+        .arg(point.deviceAddr)
+        .arg(point.group)
+        .arg(point.entry)
+        .arg(valueStr)
+        .arg(point.unit)
+        .arg(typeStr)
+        .arg(formatQuality(point.quality))
+        .arg(point.description);
 }
 
 void DataPrinter::onGenericData(uint16_t deviceAddr, const IEC103::GenericDataItem& item)
 {
-    qInfo() << "[GENERIC] Dev=" << deviceAddr
-            << "GIN=" << item.gin.group << "/" << item.gin.entry
-            << "DataType=" << static_cast<int>(item.gdd.dataType)
-            << "Size=" << item.gdd.dataSize;
+    qInfo().noquote() << QString("[%1] [GENERIC_RAW] Dev=%2 GIN=%3/%4 DataType=%5 Size=%6")
+        .arg(ts())
+        .arg(deviceAddr)
+        .arg(item.gin.group)
+        .arg(item.gin.entry)
+        .arg(static_cast<int>(item.gdd.dataType))
+        .arg(item.gdd.dataSize);
 }
 
 void DataPrinter::onGIStarted(uint16_t deviceAddr)
 {
-    qInfo() << "[GI] Started for device" << deviceAddr;
+    qInfo().noquote() << QString("[%1] [GI] Started for device %2").arg(ts()).arg(deviceAddr);
 }
 
 void DataPrinter::onGICompleted(uint16_t deviceAddr)
 {
-    qInfo() << "[GI] Completed for device" << deviceAddr;
+    qInfo().noquote() << QString("[%1] [GI] Completed for device %2").arg(ts()).arg(deviceAddr);
 }
 
 QString DataPrinter::formatQuality(const IEC103::Quality& quality)
