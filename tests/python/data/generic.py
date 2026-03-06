@@ -32,8 +32,11 @@ class GenericDataGenerator:
     """通用服务数据生成器 (遥测/遥脉统一)"""
     
     # 数据类型常量
-    DATA_TYPE_FLOAT = 7     # R32.23浮点数 (遥测)
+    DATA_TYPE_ASCII = 1     # OS8ASCII字符串
     DATA_TYPE_UINT = 3      # 无符号整数 (遥脉/状态)
+    DATA_TYPE_INT = 4       # 有符号整数
+    DATA_TYPE_FLOAT = 7     # R32.23浮点数 (遥测)
+    DATA_TYPE_DPI = 9       # 双点信息
     
     def __init__(self):
         self.points: List[GenericPoint] = []
@@ -86,21 +89,64 @@ class GenericDataGenerator:
             GenericPoint(4, 5, "零序二段压板", 0, "", self.DATA_TYPE_UINT),
         ]
         self.points.extend(soft_board_points)
+        
+        # ========== 组5: ASCII字符串测试 ==========
+        ascii_points = [
+            GenericPoint(5, 1, "装置型号", "PCS-9000", "", self.DATA_TYPE_ASCII),
+            GenericPoint(5, 2, "软件版本", "V2.1.0", "", self.DATA_TYPE_ASCII),
+            GenericPoint(5, 3, "厂家名称", "XJ-RELAY", "", self.DATA_TYPE_ASCII),
+            GenericPoint(5, 4, "装置地址", "DEV-001", "", self.DATA_TYPE_ASCII),
+        ]
+        self.points.extend(ascii_points)
+        
+        # ========== 组6: 有符号整数测试 ==========
+        int_points = [
+            GenericPoint(6, 1, "有功功率(整数)", 5000, "kW", self.DATA_TYPE_INT, min_val=-10000, max_val=10000, noise=100),
+            GenericPoint(6, 2, "无功功率(整数)", -1200, "kVar", self.DATA_TYPE_INT, min_val=-5000, max_val=5000, noise=50),
+            GenericPoint(6, 3, "功率因数(千分)", 850, "", self.DATA_TYPE_INT, min_val=-1000, max_val=1000, noise=5),
+            GenericPoint(6, 4, "温度偏差", -15, "℃", self.DATA_TYPE_INT, min_val=-50, max_val=50, noise=2),
+        ]
+        self.points.extend(int_points)
+        
+        # ========== 组7: 双点信息测试 (DPI) ==========
+        # DPI: 0=不确定, 1=分/OFF, 2=合/ON, 3=不确定
+        dpi_points = [
+            GenericPoint(7, 1, "开关1状态", 2, "", self.DATA_TYPE_DPI),  # 合
+            GenericPoint(7, 2, "开关2状态", 1, "", self.DATA_TYPE_DPI),  # 分
+            GenericPoint(7, 3, "开关3状态", 2, "", self.DATA_TYPE_DPI),  # 合
+            GenericPoint(7, 4, "隔离开关1", 1, "", self.DATA_TYPE_DPI),  # 分
+            GenericPoint(7, 5, "接地开关", 0, "", self.DATA_TYPE_DPI),  # 不确定
+        ]
+        self.points.extend(dpi_points)
     
     def update(self):
-        """更新数据 (遥测添加随机噪声, 遥脉累加)"""
+        """更新数据 (遥测添加随机噪声, 遥脉累加, 状态变化)"""
         for point in self.points:
             if point.data_type == self.DATA_TYPE_FLOAT:
-                # 遥测: 添加随机噪声
+                # 浮点数: 添加随机噪声
                 if point.noise > 0:
                     noise = random.uniform(-point.noise, point.noise)
                     point.value = max(point.min_val, 
                                      min(point.max_val, point.value + noise))
             elif point.data_type == self.DATA_TYPE_UINT:
-                # 遥脉/状态: 累加
+                # 无符号整数: 累加
                 if point.increment > 0:
                     inc = random.randint(0, point.increment * 2)
                     point.value = point.value + inc
+            elif point.data_type == self.DATA_TYPE_INT:
+                # 有符号整数: 随机波动
+                if point.noise > 0:
+                    noise = random.randint(-int(point.noise), int(point.noise))
+                    point.value = max(int(point.min_val),
+                                     min(int(point.max_val), point.value + noise))
+            elif point.data_type == self.DATA_TYPE_DPI:
+                # 双点信息: 小概率随机变化 (5%概率)
+                if random.random() < 0.05:
+                    # 在1(分)和2(合)之间切换
+                    point.value = 3 - point.value if point.value in [1, 2] else random.choice([1, 2])
+            elif point.data_type == self.DATA_TYPE_ASCII:
+                # ASCII字符串: 不变化
+                pass
     
     def get_group_points(self, group: int) -> List[GenericPoint]:
         """获取指定组的数据点"""

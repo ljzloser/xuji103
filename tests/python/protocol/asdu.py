@@ -74,9 +74,12 @@ class KOD(IntEnum):
 class DataType(IntEnum):
     """通用分类数据类型"""
     OS8ASCII = 1                 # ASCII字符串
-    UNSIGNED = 3                 # 无符号整数
-    SIGNED = 5                   # 有符号整数
-    FLOAT = 7                    # R32.23浮点数
+    UNSIGNED = 3                 # 无符号整数 (UI)
+    SIGNED = 4                   # 有符号整数 (I)
+    UF = 5                       # 无符号浮点数
+    FLOAT = 6                    # 浮点数 (F)
+    R32_23 = 7                   # IEEE 754短实数 (R32.23)
+    DPI = 9                      # 双点信息
     FAILURE_CODE = 22            # 失败回答码
     DATA_STRUCTURE = 23          # 数据结构
     # 南网扩展类型
@@ -216,10 +219,12 @@ class GenericDataItem:
         result.append(self.data_type)
         result.append(self.data_size)
         result.append(self.data_count)
-        # GID
-        if self.data_type == DataType.FLOAT:
+        # GID - 根据数据类型编码
+        if self.data_type == DataType.R32_23 or self.data_type == DataType.FLOAT:
+            # 浮点数 (IEEE 754)
             result.extend(struct.pack('<f', float(self.value)))
         elif self.data_type == DataType.UNSIGNED:
+            # 无符号整数
             if self.data_size == 1:
                 result.append(int(self.value) & 0xFF)
             elif self.data_size == 2:
@@ -227,15 +232,27 @@ class GenericDataItem:
             elif self.data_size == 4:
                 result.extend(struct.pack('<I', int(self.value)))
         elif self.data_type == DataType.SIGNED:
+            # 有符号整数
             if self.data_size == 2:
                 result.extend(struct.pack('<h', int(self.value)))
             elif self.data_size == 4:
                 result.extend(struct.pack('<i', int(self.value)))
         elif self.data_type == DataType.OS8ASCII:
+            # ASCII字符串
             if isinstance(self.value, str):
-                result.extend(self.value.encode('ascii')[:self.data_size])
+                encoded = self.value.encode('ascii')[:self.data_size]
+                result.extend(encoded)
+                # 补齐到data_size
+                if len(encoded) < self.data_size:
+                    result.extend(b'\x00' * (self.data_size - len(encoded)))
             else:
                 result.extend(str(self.value).encode('ascii')[:self.data_size])
+        elif self.data_type == DataType.DPI:
+            # 双点信息 (1字节)
+            result.append(int(self.value) & 0x03)
+        else:
+            # 默认: 按浮点数处理
+            result.extend(struct.pack('<f', float(self.value)))
         return bytes(result)
 
 

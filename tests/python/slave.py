@@ -307,24 +307,70 @@ class IEC103Slave:
         items = []
         
         for p in points:
-            # 根据 data_type 判断数据类型
-            if p.data_type == GenericDataGenerator.DATA_TYPE_FLOAT:
-                # 浮点数 (遥测)
-                data_type = DataType.FLOAT
-            elif p.data_type == GenericDataGenerator.DATA_TYPE_UINT:
-                # 无符号整数 (遥脉)
-                data_type = DataType.UNSIGNED
-            else:
-                data_type = DataType.FLOAT  # 默认浮点
+            # 根据数据类型设置参数
+            data_type = p.data_type  # 直接使用定义的数据类型
             
-            item = GenericDataItem(
-                gin_group=p.group,
-                gin_entry=p.entry,
-                kod=KOD.ACTUAL_VALUE,
-                data_type=data_type,
-                data_size=4,
-                value=p.value
-            )
+            if data_type == GenericDataGenerator.DATA_TYPE_ASCII:
+                # ASCII字符串
+                data_size = min(len(str(p.value)), 20)  # 最大20字节
+                item = GenericDataItem(
+                    gin_group=p.group,
+                    gin_entry=p.entry,
+                    kod=KOD.ACTUAL_VALUE,
+                    data_type=DataType.OS8ASCII,
+                    data_size=data_size,
+                    value=p.value
+                )
+            elif data_type == GenericDataGenerator.DATA_TYPE_UINT:
+                # 无符号整数
+                item = GenericDataItem(
+                    gin_group=p.group,
+                    gin_entry=p.entry,
+                    kod=KOD.ACTUAL_VALUE,
+                    data_type=DataType.UNSIGNED,
+                    data_size=4,
+                    value=p.value
+                )
+            elif data_type == GenericDataGenerator.DATA_TYPE_INT:
+                # 有符号整数
+                item = GenericDataItem(
+                    gin_group=p.group,
+                    gin_entry=p.entry,
+                    kod=KOD.ACTUAL_VALUE,
+                    data_type=DataType.SIGNED,
+                    data_size=4,
+                    value=p.value
+                )
+            elif data_type == GenericDataGenerator.DATA_TYPE_FLOAT:
+                # 浮点数 (R32.23)
+                item = GenericDataItem(
+                    gin_group=p.group,
+                    gin_entry=p.entry,
+                    kod=KOD.ACTUAL_VALUE,
+                    data_type=DataType.R32_23,
+                    data_size=4,
+                    value=p.value
+                )
+            elif data_type == GenericDataGenerator.DATA_TYPE_DPI:
+                # 双点信息
+                item = GenericDataItem(
+                    gin_group=p.group,
+                    gin_entry=p.entry,
+                    kod=KOD.ACTUAL_VALUE,
+                    data_type=DataType.DPI,
+                    data_size=1,
+                    value=p.value
+                )
+            else:
+                # 默认浮点
+                item = GenericDataItem(
+                    gin_group=p.group,
+                    gin_entry=p.entry,
+                    kod=KOD.ACTUAL_VALUE,
+                    data_type=DataType.R32_23,
+                    data_size=4,
+                    value=p.value
+                )
             items.append(item)
 
         if items:
@@ -332,8 +378,9 @@ class IEC103Slave:
                 self.device_addr, rii, items, COT.GENERIC_DATA_RESP
             )
             frames.append(self.build_i_frame(asdu_resp))
-            type_str = "浮点" if self.generic_gen.is_float_group(group) else "整数"
-            logger.info(f"通用服务响应: 组{group} {len(items)}个点 ({type_str})")
+            type_names = {1: "ASCII", 3: "UINT", 4: "INT", 7: "FLOAT", 9: "DPI"}
+            type_str = type_names.get(points[0].data_type if points else 0, "未知")
+            logger.info(f"通用服务响应: 组{group} {len(items)}个点 (类型={type_str})")
 
         return frames
 
