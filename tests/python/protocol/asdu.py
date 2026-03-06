@@ -254,13 +254,14 @@ class ASDUParser:
     @staticmethod
     def parse_generic_read(asdu: ASDU) -> Tuple[int, int, int, int]:
         """解析通用分类读命令 (ASDU21)"""
-        # FUN + INF + RII + NGD + GIN + KOD
+        # FUN + INF + RII + NGD + GIN(组/条目) + KOD
         fun = asdu.data[0]
         inf = asdu.data[1]
         rii = asdu.data[2]
-        gin_group = asdu.data[3]
-        gin_entry = asdu.data[4]
-        kod = asdu.data[5]
+        ngd = asdu.data[3]  # NGD (包含CONT位)
+        gin_group = asdu.data[4]
+        gin_entry = asdu.data[5]
+        kod = asdu.data[6]
         return fun, inf, rii, gin_group, gin_entry, kod
 
 
@@ -294,11 +295,15 @@ class ASDUBuilder:
     
     @staticmethod
     def build_generic_data(asdu_addr: int, rii: int, items: List[GenericDataItem],
-                           cot: int = COT.GENERIC_DATA_RESP, cont: bool = False) -> ASDU:
+                           cot: int = COT.GENERIC_DATA_RESP, cont: bool = False,
+                           fun: int = FUN.GEN, inf: int = INF.READ_GROUP_ALL) -> ASDU:
         """
         构建通用分类数据 (ASDU10)
         """
         data = bytearray()
+        # FUN + INF (南网规范)
+        data.append(fun)
+        data.append(inf)
         # RII
         data.append(rii)
         # NGD (CONT位 + 数目)

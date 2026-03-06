@@ -159,6 +159,11 @@ void IEC103Master::onDisconnected()
     stopTestTimer();
     stopAckTimer();
     
+    // 重置序号管理器
+    m_seqManager.reset();
+    m_giState.inProgress = false;
+    m_genericState.inProgress = false;
+    
     if (m_handler) {
         m_handler->onDisconnected();
     }

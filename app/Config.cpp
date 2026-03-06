@@ -69,17 +69,17 @@ bool Config::parseArgs(const QStringList& args)
     // 遥测/遥脉组选项
     QCommandLineOption analogOption(
         QStringList() << "a" << "analog-groups",
-        "遥测组列表 (默认: 8,9, 10)",
+        "遥测组列表 (默认: 8,9,10)",
         "groups",
-        "8,9, 10"
+        "8,9,10"
     );
     parser.addOption(analogOption);
     
     QCommandLineOption counterOption(
         QStringList() << "c" << "counter-groups",
-        "遥脉组列表 (默认: 16, 17)",
+        "遥脉组列表 (默认: 16,17)",
         "groups",
-        "16, 17"
+        "16,17"
     );
     parser.addOption(counterOption);
     

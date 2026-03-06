@@ -124,10 +124,10 @@ int main(int argc, char *argv[])
     auto quit = [&]()
     {
         application.stop();
-        app.quit(); };
+    };
     QObject::connect(&timer, &QTimer::timeout, quit);
     application.start();
-    timer.start(10000);
+    timer.start(30000);  // 30秒后退出，足够完成测试
     return app.exec();
 }
 
