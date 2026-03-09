@@ -32,6 +32,7 @@ set(IEC103_HEADERS
     include/iec103/asdu/ASDU11.h
     include/iec103/asdu/ASDU42.h
     include/iec103/callback/IDataHandler.h
+    include/iec103/callback/ILogHandler.h
     include/iec103/transport/TcpTransport.h
 )
 

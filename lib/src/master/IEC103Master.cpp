@@ -159,6 +159,16 @@ void IEC103Master::setDataHandler(IDataHandler* handler)
 {
     m_handler = handler;
 }
+
+void IEC103Master::setLogHandler(ILogHandler* handler)
+{
+    Logger::setHandler(handler);
+}
+
+void IEC103Master::setLogLevel(LogLevel level)
+{
+    Logger::setLevel(level);
+}
 void IEC103Master::generalInterrogation(uint16_t deviceAddr)
 {
     if (!isConnected()) {

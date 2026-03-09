@@ -400,7 +400,54 @@ signals:
     void giFinished(uint16_t deviceAddr);          // 总召唤完成
 ```
 
-### IDataHandler 回调接口
+### ILogHandler 日志回调接口
+
+库内置日志系统，支持自定义日志输出：
+
+```cpp
+#include <iec103/callback/ILogHandler.h>
+
+class MyLogHandler : public IEC103::ILogHandler {
+public:
+    void onLog(const IEC103::LogRecord& record) override {
+        // 自定义日志处理
+        // 可以输出到文件、数据库、UI等
+        
+        QString levelStr;
+        switch (record.level) {
+            case IEC103::LogLevel::Debug:   levelStr = "DEBUG"; break;
+            case IEC103::LogLevel::Info:    levelStr = "INFO"; break;
+            case IEC103::LogLevel::Warning: levelStr = "WARN"; break;
+            case IEC103::LogLevel::Error:   levelStr = "ERROR"; break;
+        }
+        
+        // 示例：输出到自定义日志系统
+        myLogger.log(QString("[%1] [%2] %3")
+                    .arg(record.timestamp)
+                    .arg(levelStr)
+                    .arg(record.message));
+    }
+};
+
+// 设置日志回调（全局设置）
+IEC103::IEC103Master::setLogHandler(new MyLogHandler());
+
+// 设置日志级别
+IEC103::IEC103Master::setLogLevel(IEC103::LogLevel::Debug);
+```
+
+**LogRecord 结构：**
+
+```cpp
+struct LogRecord {
+    LogLevel level;       // 日志级别
+    QString message;      // 日志消息
+    QString timestamp;    // 时间戳字符串
+    QDateTime dateTime;   // 时间戳对象
+};
+```
+
+### IDataHandler 数据回调接口
 
 ```cpp
 #include <iec103/callback/IDataHandler.h>

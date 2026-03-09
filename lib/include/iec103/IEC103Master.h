@@ -4,6 +4,7 @@
 #include "types/Types.h"
 #include "types/Constants.h"
 #include "callback/IDataHandler.h"
+#include "callback/ILogHandler.h"
 #include "apci/Frame.h"
 #include "apci/SeqManager.h"
 #include "apci/SendQueue.h"
@@ -52,6 +53,10 @@ public:
 
     // 数据回调
     void setDataHandler(IDataHandler* handler);
+
+    // 日志回调（全局设置，对所有IEC103Master实例生效）
+    static void setLogHandler(ILogHandler* handler);
+    static void setLogLevel(LogLevel level);
 
     // 数据召唤
     void generalInterrogation(uint16_t deviceAddr = 0);
