@@ -1307,6 +1307,33 @@ INF (本项目使用的读命令):
 - [x] 集成测试 (主站+Python子站)
 - [ ] API文档
 
+### Phase 10: 安全性与稳定性修复 (2026-03-09)
+
+#### P0 安全性修复
+- [x] **帧长度校验**: 检测超长帧(>2045字节)并断开连接
+- [x] **接收缓冲区限制**: 防止内存耗尽攻击
+
+#### P1 稳定性修复
+- [x] **T0连接超时**: 30秒连接建立超时
+- [x] **T1命令超时扩展**: GI命令和读命令超时保护
+- [x] **DataType 213-217解析**: 南网扩展数据类型完整支持
+- [x] **KOD 67H属性结构**: 基本解析支持
+
+#### P2 可靠性增强
+- [x] **ASDU11通用分类标识**: 读单个条目目录响应
+- [x] **重连次数限制**: 默认无限重连(适合后台服务)
+- [x] **链路断开通知完善**: 带原因的断开回调
+- [x] **发送队列**: 未确认I帧缓存
+- [x] **k值阻塞超时告警**: 防止死锁
+- [x] **配置参数校验**: 参数范围检查
+
+#### 测试验证
+- [x] 正常模式测试 (总召唤、通用服务、w值确认)
+- [x] no_ack模式测试 (k值阻塞)
+- [x] oversized_frame模式测试 (帧长度校验)
+- [x] ext_types模式测试 (DataType 213-217)
+- [x] 无限重连验证
+
 ---
 
 ## 十六、本项目不实现的功能
@@ -1623,7 +1650,42 @@ python slave.py --port 2404 --log-level debug
 | `--host` | 绑定地址 | 0.0.0.0 |
 | `--data` | 模拟数据配置文件 | - |
 | `--log-level` | 日志级别 | info |
+| `--test-mode` | 测试模式 | normal |
+
+### 23.6 测试模式
+
+子站模拟器支持多种测试模式，用于验证主站的各种功能：
+
+```bash
+python slave.py --test-mode <模式>
+```
+
+| 模式 | 说明 | 测试目标 |
+|-----|------|---------|
+| `normal` | 正常模式 | 完整通信流程验证 |
+| `no_ack` | 不发送S帧确认 | k值阻塞超时机制 |
+| `oversized_frame` | 发送超长帧 | 帧长度校验(P0) |
+| `no_response` | 不响应命令 | T1命令超时机制 |
+| `flood` | 快速发送大量帧 | 接收缓冲区限制(P0) |
+| `ext_types` | 发送南网扩展数据类型 | DataType 213-217解析(P1) |
+
+**测试模式核心日志示例：**
+
+```
+# oversized_frame模式 - 主站检测超长帧
+TcpTransport: Frame length exceeds maximum 2045 , got 3010 - clearing and disconnecting
+[ERROR] Transport error: Frame length exceeds maximum: 3010
+
+# ext_types模式 - 主站解析南网扩展类型
+[INFO] Generic(float215): Dev=1 Group=100 Entry=1 Value=123.45 DataType=215
+[INFO] Generic(int216): Dev=1 Group=100 Entry=2 Value=65535 DataType=216
+[INFO] Generic(char217): Dev=1 Group=100 Entry=3 Value="A" DataType=217
+
+# normal模式 - w值确认机制
+[INFO] [w-Control] I-Frame #3 received, w=3, threshold=REACHED
+[INFO] [S-TX] Sent S-Frame N(R)=3 (acknowledged peer's I-frames)
+```
 
 ---
 
-*最后更新: 2026-03-06*
+*最后更新: 2026-03-09*
