@@ -21,7 +21,7 @@ public:
         int readTimeout = 15000;
         int reconnectInterval = 5000;
         bool autoReconnect = true;
-        int maxReconnectCount = 10;  // 最大重连次数，0=无限
+        int maxReconnectCount = 0;  // 最大重连次数，0=无限（默认无限，适合后台服务）
     };
 
     explicit TcpTransport(QObject* parent = nullptr);
