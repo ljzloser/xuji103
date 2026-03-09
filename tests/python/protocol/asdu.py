@@ -357,3 +357,99 @@ class ASDUBuilder:
         data.append(0)
         
         return ASDU(TI.SINGLE_POINT, 1, cot, 0, asdu_addr, bytes(data))
+    
+    @staticmethod
+    def build_catalog_data(asdu_addr: int, rii: int, gin_group: int, gin_entry: int,
+                           entries: List[Tuple[int, int, int, bytes]],
+                           cot: int = COT.GENERIC_DATA_RESP,
+                           fun: int = FUN.GEN, inf: int = INF.READ_SINGLE_CATALOG) -> ASDU:
+        """
+        构建通用分类标识 (ASDU11) - 读单个条目目录响应
+        
+        entries: [(kod, data_type, data_size, gid), ...]
+        """
+        data = bytearray()
+        # FUN + INF (南网规范)
+        data.append(fun)
+        data.append(inf)
+        # RII
+        data.append(rii)
+        # NGD (CONT位 + 数目)
+        ngd = len(entries) & 0x7F
+        data.append(ngd)
+        # GIN (请求的GIN)
+        data.append(gin_group)
+        data.append(gin_entry)
+        # 数据集 (目录条目)
+        for kod, data_type, data_size, gid in entries:
+            data.append(kod)  # KOD
+            data.append(data_type)  # GDD.DataType
+            data.append(data_size)  # GDD.DataSize
+            data.append(1)  # GDD.Number
+            data.extend(gid)  # GID
+        
+        return ASDU(0x0B, 1, cot, 0, asdu_addr, bytes(data))  # TI=0x0B=11
+    
+    @staticmethod
+    def build_generic_data_with_time(asdu_addr: int, rii: int, 
+                                      gin_group: int, gin_entry: int,
+                                      data_type: int, value: Any,
+                                      relative_time: int = 0,
+                                      fault_num: int = 0,
+                                      cot: int = COT.GENERIC_DATA_RESP) -> ASDU:
+        """
+        构建带时标的通用分类数据 (南网扩展数据类型 215/216/217)
+        
+        data_type: 
+            215 = 带相对时间七字节时标的浮点值
+            216 = 带相对时间七字节时标的整形值
+            217 = 带相对时间七字节时标的字符值
+        """
+        data = bytearray()
+        # FUN + INF
+        data.append(FUN.GEN)
+        data.append(INF.READ_GROUP_ALL)
+        # RII
+        data.append(rii)
+        # NGD
+        data.append(1)  # 1个条目
+        # GIN
+        data.append(gin_group)
+        data.append(gin_entry)
+        # KOD
+        data.append(KOD.ACTUAL_VALUE)
+        # GDD
+        data.append(data_type)
+        
+        # 计算数据大小
+        if data_type == DataType.FLOAT_WITH_TIME:  # 215
+            # RET(2) + FAN(2) + Time(7) + Float(4) = 15字节
+            data_size = 15
+        elif data_type == DataType.INT_WITH_TIME:  # 216
+            # RET(2) + FAN(2) + Time(7) + Int(4) = 15字节
+            data_size = 15
+        elif data_type == DataType.CHAR_WITH_TIME:  # 217
+            # RET(2) + FAN(2) + Time(7) + Char(1) = 12字节
+            data_size = 12
+        else:
+            data_size = 15
+        
+        data.append(data_size)  # DataSize
+        data.append(1)  # Number
+        
+        # GID - 构建数据
+        # 相对时间 (2字节)
+        data.extend(struct.pack('<H', relative_time))
+        # 故障序号 (2字节)
+        data.extend(struct.pack('<H', fault_num))
+        # 7字节时标
+        data.extend(CP56Time2a.now().encode())
+        # 实际数据
+        if data_type == DataType.FLOAT_WITH_TIME:
+            data.extend(struct.pack('<f', float(value)))
+        elif data_type == DataType.INT_WITH_TIME:
+            data.extend(struct.pack('<I', int(value)))
+        elif data_type == DataType.CHAR_WITH_TIME:
+            data.append(int(value) & 0xFF)
+        
+        return ASDU(TI.GENERIC_DATA, 1, cot, 0, asdu_addr, bytes(data))

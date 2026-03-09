@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 class IEC103Slave:
     """IEC103子站模拟器"""
 
-    def __init__(self, device_addr: int = 1):
+    def __init__(self, device_addr: int = 1, test_mode: str = 'normal'):
         self.device_addr = device_addr
         self.send_seq = 0
         self.recv_seq = 0
@@ -57,6 +57,16 @@ class IEC103Slave:
         # 发送队列（用于k值控制）
         self.send_queue = []
         self.unconfirmed_count = 0  # 未确认的I帧数
+        
+        # ========== 测试模式 ==========
+        # normal: 正常模式
+        # no_ack: 不发送S帧确认（测试k值阻塞超时）
+        # oversized_frame: 发送超长帧（测试帧长度校验）
+        # no_response: 不响应命令（测试T1超时）
+        # flood: 快速发送大量帧（测试接收缓冲区限制）
+        # ext_types: 发送南网扩展数据类型(213-217)
+        self.test_mode = test_mode
+        self.test_frame_sent = 0  # 测试帧计数
 
     def reset(self):
         """重置状态"""
@@ -161,16 +171,20 @@ class IEC103Slave:
             logger.info(f"[I-RX] N(S)={frame.send_seq} N(R)={frame.recv_seq}, "
                        f"recv_count={self.recv_count}/{self.max_ack_delay}")
 
-            # w值控制：收到w个I帧后立即发S帧确认
-            if self.recv_count >= self.max_ack_delay:
-                ack = FrameCodec.encode_s_format(self.recv_seq)
-                writer.write(ack)
-                await writer.drain()
-                logger.info(f"[w-Control] w threshold reached: {self.recv_count} >= {self.max_ack_delay}")
-                logger.info(f"[S-TX] Sent S-Frame N(R)={self.recv_seq} (acknowledged)")
-                self.recv_count = 0
+            # ========== 测试模式: no_ack ==========
+            if self.test_mode == 'no_ack':
+                logger.warning(f"[TEST] no_ack模式: 不发送S帧确认")
             else:
-                logger.debug(f"[w-Control] w threshold not reached, waiting...")
+                # w值控制：收到w个I帧后立即发S帧确认
+                if self.recv_count >= self.max_ack_delay:
+                    ack = FrameCodec.encode_s_format(self.recv_seq)
+                    writer.write(ack)
+                    await writer.drain()
+                    logger.info(f"[w-Control] w threshold reached: {self.recv_count} >= {self.max_ack_delay}")
+                    logger.info(f"[S-TX] Sent S-Frame N(R)={self.recv_seq} (acknowledged)")
+                    self.recv_count = 0
+                else:
+                    logger.debug(f"[w-Control] w threshold not reached, waiting...")
 
             await self.handle_i_format(frame, writer)
         elif frame.is_s_format:
@@ -208,6 +222,14 @@ class IEC103Slave:
             writer.write(response)
             await writer.drain()
             logger.info("发送STARTDT确认")
+            
+            # ========== 测试模式: oversized_frame ==========
+            if self.test_mode == 'oversized_frame':
+                await self.send_oversized_frame_test(writer)
+            
+            # ========== 测试模式: flood ==========
+            if self.test_mode == 'flood':
+                await self.send_flood_test(writer)
 
         elif u_type == 0x13:  # STOPDT_ACT
             logger.info("收到STOPDT停止命令")
@@ -223,6 +245,60 @@ class IEC103Slave:
             response = FrameCodec.encode_u_format(0x83)
             writer.write(response)
             await writer.drain()
+    
+    async def send_oversized_frame_test(self, writer: asyncio.StreamWriter):
+        """
+        发送超长帧测试 (P0: 帧长度校验)
+        
+        发送超过最大允许长度(2045字节)的帧，测试主站是否会断开连接
+        """
+        logger.warning("[TEST] 发送超长帧测试...")
+        
+        # 构建超长帧 (3000字节ASDU)
+        oversized_data = b'\x00' * 3000
+        asdu = ASDU(0x01, 1, 1, 0, self.device_addr, oversized_data)
+        
+        # 手动构建帧头
+        frame_data = bytearray()
+        frame_data.append(0x68)  # 启动字符
+        # 长度 = APCI(4) + ASDU长度 (3006 > 2045)
+        length = 4 + len(asdu.encode())
+        frame_data.extend(struct.pack('<H', length))  # 2字节长度
+        # APCI (I格式)
+        frame_data.extend(struct.pack('<H', self.send_seq << 1))  # N(S)
+        frame_data.extend(struct.pack('<H', self.recv_seq << 1))  # N(R)
+        # ASDU
+        frame_data.extend(asdu.encode())
+        
+        writer.write(bytes(frame_data))
+        await writer.drain()
+        
+        logger.warning(f"[TEST] 已发送超长帧: ASDU长度={len(oversized_data)}, 总长度={length}")
+        self.send_seq = (self.send_seq + 1) & 0x7FFF
+    
+    async def send_flood_test(self, writer: asyncio.StreamWriter):
+        """
+        发送大量帧测试 (P0: 接收缓冲区限制)
+        
+        快速连续发送大量I帧，测试主站接收缓冲区处理
+        """
+        logger.warning("[TEST] 发送大量帧测试...")
+        
+        for i in range(50):
+            # 构建简单的遥信数据
+            asdu = ASDUBuilder.build_single_point(
+                self.device_addr, 200, i + 1, 2, cot=COT.SPONTANEOUS
+            )
+            frame = self.build_i_frame(asdu)
+            writer.write(frame)
+            
+            # 不等待drain，快速发送
+            if (i + 1) % 10 == 0:
+                await writer.drain()
+                logger.info(f"[TEST] 已发送 {i + 1} 帧...")
+        
+        await writer.drain()
+        logger.warning(f"[TEST] 完成: 发送了 50 帧")
 
     async def handle_i_format(self, frame: Frame, writer: asyncio.StreamWriter):
         """处理I格式帧"""
@@ -232,6 +308,11 @@ class IEC103Slave:
 
         asdu = ASDU.parse(frame.asdu_data)
         logger.info(f"收到ASDU: TI={asdu.ti:02X} COT={asdu.cot} ADDR={asdu.asdu_addr}")
+
+        # ========== 测试模式: no_response ==========
+        if self.test_mode == 'no_response':
+            logger.warning(f"[TEST] no_response模式: 不响应命令 (TI={asdu.ti:02X})")
+            return
 
         response = None
 
@@ -244,6 +325,10 @@ class IEC103Slave:
 
         if response:
             await self.send_response(response, writer)
+            
+            # ========== 测试模式: ext_types ==========
+            if self.test_mode == 'ext_types' and self.test_frame_sent == 0:
+                await self.send_extended_types_test(writer)
 
     async def handle_gi_cmd(self, asdu: ASDU) -> Optional[bytes]:
         """处理总召唤命令"""
@@ -289,11 +374,117 @@ class IEC103Slave:
         if inf == INF.READ_GROUP_ALL:
             # 读一组全部条目
             frames = self.build_generic_group_response(rii, gin_group, gin_entry)
+        elif inf == INF.READ_SINGLE_CATALOG:
+            # 读单个条目目录 (ASDU11响应)
+            frames = self.build_catalog_response(rii, gin_group, gin_entry, kod)
         elif inf == INF.READ_SINGLE_VALUE:
             # 读单个条目
             frames = self.build_generic_single_response(rii, gin_group, gin_entry)
 
         return frames
+    
+    def build_catalog_response(self, rii: int, group: int, entry: int, kod: int) -> list:
+        """
+        构建ASDU11目录响应
+        
+        目录包含多个KOD的描述:
+        - KOD 0x01: 实际值
+        - KOD 0x0A: 描述
+        - KOD 0x67: 属性结构
+        """
+        frames = []
+        
+        # 获取数据点
+        point = self.generic_gen.get_point(group, entry)
+        if not point:
+            logger.warning(f"未找到数据点: 组{group} 条目{entry}")
+            return frames
+        
+        # 构建目录条目
+        entries = []
+        
+        # 实际值 (KOD=0x01)
+        if point.data_type == GenericDataGenerator.DATA_TYPE_FLOAT:
+            entries.append((KOD.ACTUAL_VALUE, DataType.R32_23, 4, struct.pack('<f', float(point.value))))
+        elif point.data_type == GenericDataGenerator.DATA_TYPE_UINT:
+            entries.append((KOD.ACTUAL_VALUE, DataType.UNSIGNED, 4, struct.pack('<I', int(point.value))))
+        elif point.data_type == GenericDataGenerator.DATA_TYPE_INT:
+            entries.append((KOD.SIGNED, DataType.SIGNED, 4, struct.pack('<i', int(point.value))))
+        elif point.data_type == GenericDataGenerator.DATA_TYPE_ASCII:
+            encoded = point.value.encode('ascii')[:20] if isinstance(point.value, str) else str(point.value).encode('ascii')[:20]
+            entries.append((KOD.ACTUAL_VALUE, DataType.OS8ASCII, len(encoded), encoded))
+        elif point.data_type == GenericDataGenerator.DATA_TYPE_DPI:
+            entries.append((KOD.ACTUAL_VALUE, DataType.DPI, 1, bytes([int(point.value) & 0x03])))
+        
+        # 描述 (KOD=0x0A)
+        desc = point.name.encode('ascii')[:20]
+        entries.append((KOD.DESCRIPTION, DataType.OS8ASCII, len(desc), desc))
+        
+        # 属性结构 (KOD=0x67) - 南网扩展
+        # 简化版本：包含数据类型、量程等
+        attr_data = bytearray()
+        attr_data.append(point.data_type)  # 数据类型
+        attr_data.extend(struct.pack('<f', float(point.min_val) if point.min_val else 0))  # 最小值
+        attr_data.extend(struct.pack('<f', float(point.max_val) if point.max_val else 0))  # 最大值
+        attr_data.extend(point.unit.encode('ascii')[:8].ljust(8, b'\x00'))  # 单位
+        entries.append((KOD.ATTRIBUTE, DataType.DATA_STRUCTURE, len(attr_data), bytes(attr_data)))
+        
+        asdu_resp = ASDUBuilder.build_catalog_data(
+            self.device_addr, rii, group, entry, entries
+        )
+        frames.append(self.build_i_frame(asdu_resp))
+        
+        logger.info(f"ASDU11目录响应: 组{group} 条目{entry} {len(entries)}个KOD")
+        
+        return frames
+    
+    async def send_extended_types_test(self, writer: asyncio.StreamWriter):
+        """
+        发送南网扩展数据类型测试 (213-217)
+        
+        DataType 213: 带绝对时间的七字节时标报文
+        DataType 214: 带相对时间的七字节时标报文
+        DataType 215: 带相对时间七字节时标的浮点值
+        DataType 216: 带相对时间七字节时标的整形值
+        DataType 217: 带相对时间七字节时标的字符值
+        """
+        logger.info("[TEST] 发送南网扩展数据类型测试...")
+        
+        # DataType 215: 带相对时间七字节时标的浮点值
+        asdu_215 = ASDUBuilder.build_generic_data_with_time(
+            self.device_addr, 1, 100, 1, 
+            DataType.FLOAT_WITH_TIME, 123.45,
+            relative_time=500, fault_num=1
+        )
+        frame_215 = self.build_i_frame(asdu_215)
+        writer.write(frame_215)
+        await writer.drain()
+        logger.info(f"[TEST] 发送 DataType 215 (带时标浮点): 123.45")
+        
+        # DataType 216: 带相对时间七字节时标的整形值
+        asdu_216 = ASDUBuilder.build_generic_data_with_time(
+            self.device_addr, 2, 100, 2,
+            DataType.INT_WITH_TIME, 65535,
+            relative_time=1000, fault_num=2
+        )
+        frame_216 = self.build_i_frame(asdu_216)
+        writer.write(frame_216)
+        await writer.drain()
+        logger.info(f"[TEST] 发送 DataType 216 (带时标整数): 65535")
+        
+        # DataType 217: 带相对时间七字节时标的字符值
+        asdu_217 = ASDUBuilder.build_generic_data_with_time(
+            self.device_addr, 3, 100, 3,
+            DataType.CHAR_WITH_TIME, 0x41,  # 'A'
+            relative_time=1500, fault_num=3
+        )
+        frame_217 = self.build_i_frame(asdu_217)
+        writer.write(frame_217)
+        await writer.drain()
+        logger.info(f"[TEST] 发送 DataType 217 (带时标字符): A")
+        
+        self.test_frame_sent = 1
+        logger.info("[TEST] 南网扩展数据类型测试完成")
 
     def build_generic_group_response(self, rii: int, group: int, entry: int) -> list:
         """构建通用分类组数据响应 (遥测/遥脉统一)"""
@@ -509,12 +700,21 @@ async def main():
     parser.add_argument('--port', type=int, default=2404, help='监听端口')
     parser.add_argument('--device', type=int, default=1, help='装置地址')
     parser.add_argument('--log-level', default='info', help='日志级别')
+    parser.add_argument('--test-mode', default='normal',
+                       choices=['normal', 'no_ack', 'oversized_frame', 'no_response', 'flood', 'ext_types'],
+                       help='''测试模式:
+                         normal: 正常模式
+                         no_ack: 不发送S帧确认(测试k值阻塞超时)
+                         oversized_frame: 发送超长帧(测试帧长度校验)
+                         no_response: 不响应命令(测试T1超时)
+                         flood: 快速发送大量帧(测试缓冲区限制)
+                         ext_types: 发送南网扩展数据类型(213-217)''')
     
     args = parser.parse_args()
     
     logging.getLogger().setLevel(getattr(logging, args.log_level.upper()))
     
-    slave = IEC103Slave(args.device)
+    slave = IEC103Slave(args.device, args.test_mode)
     
     server = await asyncio.start_server(
         slave.handle_client,
@@ -525,8 +725,22 @@ async def main():
     addr = server.sockets[0].getsockname()
     logger.info(f"IEC103子站模拟器启动: {addr[0]}:{addr[1]}")
     logger.info(f"装置地址: {args.device}")
+    logger.info(f"测试模式: {args.test_mode}")
     logger.info(f"k值(最大未确认帧数): {slave.max_unconfirmed}")
     logger.info(f"w值(确认阈值): {slave.max_ack_delay}")
+    
+    if args.test_mode != 'normal':
+        logger.warning(f"========== 测试模式: {args.test_mode} ==========")
+        if args.test_mode == 'no_ack':
+            logger.warning("[TEST] 将不发送S帧确认，测试主站k值阻塞超时")
+        elif args.test_mode == 'oversized_frame':
+            logger.warning("[TEST] 连接后发送超长帧，测试主站帧长度校验")
+        elif args.test_mode == 'no_response':
+            logger.warning("[TEST] 不响应任何I格式命令，测试主站T1超时")
+        elif args.test_mode == 'flood':
+            logger.warning("[TEST] 连接后快速发送大量帧，测试缓冲区限制")
+        elif args.test_mode == 'ext_types':
+            logger.warning("[TEST] 发送南网扩展数据类型(213-217)")
     
     async with server:
         await server.serve_forever()
