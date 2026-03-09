@@ -10,6 +10,8 @@ constexpr uint8_t FRAME_START_BYTE = 0x68;      // 帧起始字节
 constexpr uint16_t APDU_MAX_LENGTH = 2048;      // APDU最大长度
 constexpr uint16_t ASDU_MAX_LENGTH = 2045;      // ASDU最大长度 (2048-3)
 constexpr uint8_t APCI_LENGTH = 4;              // APCI长度
+constexpr uint16_t FRAME_LENGTH_MAX = 2045;     // 帧长度域最大值 (南网规范附录A)
+constexpr int MAX_RECEIVE_BUFFER = 4096;        // 接收缓冲区最大大小 (允许缓存2个最大帧)
 
 // I格式控制域最低位
 constexpr uint8_t I_FORMAT_MASK = 0x01;         // I格式: LSB=0

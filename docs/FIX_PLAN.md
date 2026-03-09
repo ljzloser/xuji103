@@ -20,12 +20,12 @@
 
 | 优先级 | 问题 | 状态 |
 |-------|------|------|
-| P0 | 帧长度校验 | 待修复 |
-| P0 | 接收缓冲区限制 | 待修复 |
-| P1 | T0连接超时 | 待修复 |
-| P1 | T1命令超时扩展 | 待修复 |
-| P1 | DataType 213-217解析 | 待修复 |
-| P1 | KOD 67H属性结构解析 | 待修复 |
+| P0 | 帧长度校验 | ✅ 已修复 |
+| P0 | 接收缓冲区限制 | ✅ 已修复 |
+| P1 | T0连接超时 | ✅ 已修复 |
+| P1 | T1命令超时扩展 | ✅ 已修复 |
+| P1 | DataType 213-217解析 | ✅ 已修复 |
+| P1 | KOD 67H属性结构解析 | ✅ 基本支持 |
 | P2 | ASDU11通用分类标识 | 待修复 |
 | P2 | 重连次数限制 | 待修复 |
 | P2 | 链路断开通知完善 | 待修复 |
@@ -35,7 +35,7 @@
 
 ---
 
-## P0: 帧长度校验（必须修复）
+## P0: 帧长度校验 ✅ 已修复
 
 ### 问题描述
 接收数据时未校验帧长度，恶意或异常数据可能导致缓冲区溢出。
@@ -50,11 +50,13 @@
 在 `TcpTransport::processReceivedData()` 中添加帧长度校验：
 
 ```cpp
-// 校验帧长度范围
-if (frameLen > 2045) {
-    qWarning() << "Frame length exceeds maximum 2045:" << frameLen;
-    m_receiveBuffer.clear();  // 清空缓冲区，断开连接
+// 校验帧长度范围，防止缓冲区溢出
+if (frameLen > FRAME_LENGTH_MAX) {
+    qWarning() << "TcpTransport: Frame length exceeds maximum" << FRAME_LENGTH_MAX 
+               << ", got" << frameLen << "- clearing and disconnecting";
+    m_receiveBuffer.clear();
     disconnectFromServer();
+    emit errorOccurred(QString("Frame length exceeds maximum: %1").arg(frameLen));
     return;
 }
 ```
@@ -62,14 +64,15 @@ if (frameLen > 2045) {
 ### 代码位置
 | 文件 | 函数 | 行号 |
 |------|------|------|
-| `lib/src/transport/TcpTransport.cpp` | `processReceivedData()` | ~95 |
+| `lib/src/transport/TcpTransport.cpp` | `processReceivedData()` | ~102 |
+| `lib/include/iec103/types/Constants.h` | `FRAME_LENGTH_MAX` | 新增常量 |
 
 ### 验证方法
 构造超长帧（长度域 > 2045），验证连接被断开。
 
 ---
 
-## P0: 接收缓冲区限制（必须修复）
+## P0: 接收缓冲区限制 ✅ 已修复
 
 ### 问题描述
 接收缓冲区 `m_receiveBuffer` 无大小限制，可能导致内存耗尽。
@@ -83,7 +86,7 @@ if (frameLen > 2045) {
 ### 修复内容
 1. 定义最大缓冲区大小常量：
 ```cpp
-// TcpTransport.h 或 Constants.h
+// Constants.h
 constexpr int MAX_RECEIVE_BUFFER = 4096;  // 允许缓存2个最大帧
 ```
 
@@ -92,11 +95,12 @@ constexpr int MAX_RECEIVE_BUFFER = 4096;  // 允许缓存2个最大帧
 void TcpTransport::onSocketReadyRead() {
     m_receiveBuffer.append(m_socket->readAll());
     
-    // 检查缓冲区大小
+    // 检查接收缓冲区大小，防止内存耗尽
     if (m_receiveBuffer.size() > MAX_RECEIVE_BUFFER) {
-        qWarning() << "Receive buffer overflow, clearing";
+        qWarning() << "TcpTransport: Receive buffer overflow - clearing and disconnecting";
         m_receiveBuffer.clear();
         disconnectFromServer();
+        emit errorOccurred("Receive buffer overflow");
         return;
     }
     
@@ -108,14 +112,14 @@ void TcpTransport::onSocketReadyRead() {
 | 文件 | 函数 | 行号 |
 |------|------|------|
 | `lib/src/transport/TcpTransport.cpp` | `onSocketReadyRead()` | ~56 |
-| `lib/include/iec103/types/Constants.h` | 常量定义 | 新增 |
+| `lib/include/iec103/types/Constants.h` | `MAX_RECEIVE_BUFFER` | 新增常量 |
 
 ### 验证方法
 发送大量不完整帧数据，验证缓冲区限制生效。
 
 ---
 
-## P1: T0连接超时（必须修复）
+## P1: T0连接超时 ✅ 已修复
 
 ### 问题描述
 TCP连接建立无超时保护，连接可能无限挂起。
@@ -159,15 +163,15 @@ void IEC103Master::onConnected() {
 | 文件 | 函数/变量 | 行号 |
 |------|----------|------|
 | `lib/include/iec103/IEC103Master.h` | `m_connectTimer` | 新增 |
-| `lib/src/master/IEC103Master.cpp` | `connectToServer()` | ~46 |
-| `lib/src/master/IEC103Master.cpp` | `onConnected()` | ~105 |
+| `lib/src/master/IEC103Master.cpp` | `connectToServer()` | ~61 |
+| `lib/src/master/IEC103Master.cpp` | `onConnected()` | ~205 |
 
 ### 验证方法
 连接不存在的IP，验证30秒后连接超时断开。
 
 ---
 
-## P1: T1命令超时扩展（必须修复）
+## P1: T1命令超时扩展 ✅ 已修复
 
 ### 问题描述
 T1超时仅用于TESTFR，GI命令和读命令无超时保护。

@@ -108,6 +108,13 @@ struct GenericDataItem {
     QString toAsciiString() const;
     DoublePointValue toDPI() const;
     CP56Time2a toCP56Time2a() const;
+    
+    // 南网扩展数据类型解析方法 (DataType 213-217)
+    QDateTime absoluteTime() const;   // DataType 213: 带绝对时间七字节时标报文
+    QDateTime relativeTime() const;   // DataType 214: 带相对时间七字节时标报文
+    float floatWithTime() const;      // DataType 215: 带相对时间七字节时标的浮点值
+    int32_t intWithTime() const;      // DataType 216: 带相对时间七字节时标的整形值
+    QString stringWithTime() const;   // DataType 217: 带相对时间七字节时标的字符值
 };
 
 // 通用分类数据集

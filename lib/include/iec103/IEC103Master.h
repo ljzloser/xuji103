@@ -24,12 +24,13 @@ public:
     struct Config {
         QString host;
         quint16 port = 2404;
-        int reconnectInterval = 5000;   // 重连间隔(ms)
-        int timeout = 15000;            // T1超时
-        int ackTimeout = 10000;         // T2超时
-        int testInterval = 20000;       // T3测试间隔
-        int maxUnconfirmed = 12;        // k值
-        int maxAckDelay = 8;            // w值
+        int connectTimeout = 30000;    // T0连接超时(ms)
+        int reconnectInterval = 5000;  // 重连间隔(ms)
+        int timeout = 15000;           // T1超时
+        int ackTimeout = 10000;        // T2超时
+        int testInterval = 20000;      // T3测试间隔
+        int maxUnconfirmed = 12;       // k值
+        int maxAckDelay = 8;           // w值
     };
 
     explicit IEC103Master(QObject* parent = nullptr);
@@ -70,6 +71,8 @@ private slots:
     void onDisconnected();
     void onError(const QString& error);
     void onDataReceived(const QByteArray& data);
+    void onConnectTimeout();
+    void onCmdTimeout();
     void onTestTimeout();
     void onAckTimeout();
     void onGITimeout();
@@ -111,6 +114,8 @@ private:
     bool m_startDtReceived = false;
     bool m_testFrPending = false;      // TESTFR等待确认标志
 
+    QTimer* m_connectTimer;  // T0连接超时
+    QTimer* m_cmdTimer;      // T1命令超时
     QTimer* m_testTimer;
     QTimer* m_ackTimer;
     QTimer* m_giTimer;

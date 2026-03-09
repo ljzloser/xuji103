@@ -58,6 +58,64 @@ CP56Time2a GenericDataItem::toCP56Time2a() const {
     return ts;
 }
 
+// ========== 南网扩展数据类型解析方法 (DataType 213-217) ==========
+
+QDateTime GenericDataItem::absoluteTime() const {
+    // DataType 213 (0xD5): 带绝对时间七字节时标报文
+    // 格式: CP56Time2a (7字节)
+    if (gdd.dataType == static_cast<uint8_t>(DataType::TimeTagMsg7) && gid.size() >= 7) {
+        CP56Time2a ts;
+        memcpy(&ts, gid.data(), 7);
+        return ts.toDateTime();
+    }
+    return QDateTime();
+}
+
+QDateTime GenericDataItem::relativeTime() const {
+    // DataType 214 (0xD6): 带相对时间七字节时标报文
+    // 格式: CP56Time2a (7字节) - 相对时间
+    if (gdd.dataType == static_cast<uint8_t>(DataType::TimeTagMsgRel7) && gid.size() >= 7) {
+        CP56Time2a ts;
+        memcpy(&ts, gid.data(), 7);
+        return ts.toDateTime();
+    }
+    return QDateTime();
+}
+
+float GenericDataItem::floatWithTime() const {
+    // DataType 215 (0xD7): 带相对时间七字节时标的浮点值
+    // 格式: CP56Time2a (7字节) + float (4字节) = 11字节
+    if (gdd.dataType == static_cast<uint8_t>(DataType::FloatTimeTag7) && gid.size() >= 11) {
+        uint32_t val = 0;
+        memcpy(&val, gid.data() + 7, 4);  // 跳过前7字节时标
+        float result;
+        memcpy(&result, &val, 4);
+        return result;
+    }
+    return 0.0f;
+}
+
+int32_t GenericDataItem::intWithTime() const {
+    // DataType 216 (0xD8): 带相对时间七字节时标的整形值
+    // 格式: CP56Time2a (7字节) + int32 (4字节) = 11字节
+    if (gdd.dataType == static_cast<uint8_t>(DataType::IntTimeTag7) && gid.size() >= 11) {
+        int32_t val = 0;
+        memcpy(&val, gid.data() + 7, 4);  // 跳过前7字节时标
+        return val;
+    }
+    return 0;
+}
+
+QString GenericDataItem::stringWithTime() const {
+    // DataType 217 (0xD9): 带相对时间七字节时标的字符值
+    // 格式: CP56Time2a (7字节) + ASCII字符串
+    if (gdd.dataType == static_cast<uint8_t>(DataType::CharTimeTag7) && gid.size() > 7) {
+        return QString::fromLatin1(reinterpret_cast<const char*>(gid.data() + 7), 
+                                   static_cast<int>(gid.size() - 7));
+    }
+    return QString();
+}
+
 // ========== Asdu10Parser 实现 ==========
 
 bool Asdu10Parser::parse(const Asdu& asdu) {

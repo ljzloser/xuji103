@@ -17,6 +17,8 @@ namespace IEC103 {
 IEC103Master::IEC103Master(QObject* parent)
     : QObject(parent)
     , m_transport(new TcpTransport(this))
+    , m_connectTimer(new QTimer(this))
+    , m_cmdTimer(new QTimer(this))
     , m_testTimer(new QTimer(this))
     , m_ackTimer(new QTimer(this))
     , m_giTimer(new QTimer(this))
@@ -26,6 +28,11 @@ IEC103Master::IEC103Master(QObject* parent)
     connect(m_transport, &TcpTransport::errorOccurred, this, &IEC103Master::onError);
     connect(m_transport, &TcpTransport::dataReceived, this, &IEC103Master::onDataReceived);
 
+    m_connectTimer->setSingleShot(true);
+    connect(m_connectTimer, &QTimer::timeout, this, &IEC103Master::onConnectTimeout);
+    
+    m_cmdTimer->setSingleShot(true);
+    connect(m_cmdTimer, &QTimer::timeout, this, &IEC103Master::onCmdTimeout);
     
     m_testTimer->setSingleShot(true);
     connect(m_testTimer, &QTimer::timeout, this, &IEC103Master::onTestTimeout);
@@ -58,10 +65,17 @@ void IEC103Master::connectToServer()
 {
     m_seqManager.reset();
     m_startDtReceived = false;
+    
+    // 启动T0连接超时定时器
+    m_connectTimer->start(m_config.connectTimeout);
+    Logger::debug(QString("[T0] Connect timeout timer started: %1ms").arg(m_config.connectTimeout));
+    
     m_transport->connectToServer();
 }
 void IEC103Master::disconnectFromServer()
 {
+    m_connectTimer->stop();
+    m_cmdTimer->stop();
     stopTestTimer();
     stopAckTimer();
     m_giTimer->stop();
@@ -116,6 +130,11 @@ void IEC103Master::generalInterrogation(uint16_t deviceAddr)
     m_giState.scn++;
 
     sendFrame(frame);
+    
+    // 启动T1命令超时定时器
+    m_cmdTimer->start(m_config.timeout);
+    Logger::debug(QString("[T1] Command timeout timer started: %1ms").arg(m_config.timeout));
+    
     Logger::info(QString("[I-TX] GI cmd N(S)=%1 N(R)=%2, Dev=%3 SCN=%4, unconfirmed=%5")
                  .arg(sendSeq).arg(recvSeq).arg(deviceAddr).arg(m_giState.scn)
                  .arg(m_seqManager.unconfirmedCount()));
@@ -153,6 +172,11 @@ void IEC103Master::readGenericGroup(uint16_t deviceAddr, uint8_t group)
     m_genericState.group = group;
 
     sendFrame(frame);
+    
+    // 启动T1命令超时定时器
+    m_cmdTimer->start(m_config.timeout);
+    Logger::debug(QString("[T1] Command timeout timer started: %1ms").arg(m_config.timeout));
+    
     Logger::info(QString("[I-TX] ReadGroup N(S)=%1 N(R)=%2, Dev=%3 Group=%4, unconfirmed=%5")
                  .arg(sendSeq).arg(recvSeq).arg(deviceAddr).arg(group)
                  .arg(m_seqManager.unconfirmedCount()));
@@ -169,6 +193,8 @@ void IEC103Master::stopPeriodicGI()
 
 void IEC103Master::onConnected()
 {
+    // TCP连接成功，停止T0超时定时器
+    m_connectTimer->stop();
     Logger::info("TCP connected, sending STARTDT");
     setState(LinkState::Connected);
     
@@ -210,6 +236,23 @@ void IEC103Master::onDataReceived(const QByteArray& data)
     
     processReceivedFrame(frame);
 }
+
+void IEC103Master::onConnectTimeout()
+{
+    Logger::error(QString("[T0] Connection timeout (%1ms) - Disconnecting!").arg(m_config.connectTimeout));
+    disconnectFromServer();
+    
+    if (m_handler) {
+        m_handler->onError("Connection timeout (T0)");
+    }
+}
+
+void IEC103Master::onCmdTimeout()
+{
+    Logger::error(QString("[T1] Command timeout (%1ms) - Disconnecting!").arg(m_config.timeout));
+    disconnectFromServer();
+}
+
 void IEC103Master::onTestTimeout()
 {
     // 检查上次 TESTFR 是否收到确认
@@ -262,6 +305,12 @@ void IEC103Master::processIFrame(const Frame& frame)
         return;
     }
     m_seqManager.nextRecvSeq();
+
+    // 收到I帧响应，停止T1命令超时定时器
+    if (m_cmdTimer->isActive()) {
+        m_cmdTimer->stop();
+        Logger::debug("[T1] Command timeout timer stopped (response received)");
+    }
 
     uint16_t ackSeq = frame.recvSeq();
     uint16_t prevAck = m_seqManager.lastAckSeq();
@@ -487,6 +536,55 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
                 Logger::info(QString("Generic(dpi): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=9")
                             .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(static_cast<int>(item.toDPI())));
+                break;
+                
+            // 南网扩展数据类型 213-217
+            case static_cast<uint8_t>(DataType::TimeTagMsg7):
+                // DataType 213: 带绝对时间七字节时标报文
+                point.value = item.absoluteTime();
+                point.timestamp = item.absoluteTime();
+                Logger::info(QString("Generic(time213): Dev=%1 Group=%2 Entry=%3 Time=%4 DataType=213")
+                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                            .arg(point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")));
+                break;
+                
+            case static_cast<uint8_t>(DataType::TimeTagMsgRel7):
+                // DataType 214: 带相对时间七字节时标报文
+                point.value = item.relativeTime();
+                point.timestamp = item.relativeTime();
+                Logger::info(QString("Generic(time214): Dev=%1 Group=%2 Entry=%3 Time=%4 DataType=214")
+                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                            .arg(point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")));
+                break;
+                
+            case static_cast<uint8_t>(DataType::FloatTimeTag7):
+                // DataType 215: 带相对时间七字节时标的浮点值
+                point.value = item.floatWithTime();
+                point.timestamp = item.relativeTime();
+                Logger::info(QString("Generic(float215): Dev=%1 Group=%2 Entry=%3 Value=%4 Time=%5 DataType=215")
+                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                            .arg(point.toFloat(), 0, 'f', 2)
+                            .arg(point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")));
+                break;
+                
+            case static_cast<uint8_t>(DataType::IntTimeTag7):
+                // DataType 216: 带相对时间七字节时标的整形值
+                point.value = item.intWithTime();
+                point.timestamp = item.relativeTime();
+                Logger::info(QString("Generic(int216): Dev=%1 Group=%2 Entry=%3 Value=%4 Time=%5 DataType=216")
+                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                            .arg(point.toInt32())
+                            .arg(point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")));
+                break;
+                
+            case static_cast<uint8_t>(DataType::CharTimeTag7):
+                // DataType 217: 带相对时间七字节时标的字符值
+                point.value = item.stringWithTime();
+                point.timestamp = item.relativeTime();
+                Logger::info(QString("Generic(char217): Dev=%1 Group=%2 Entry=%3 Value=\"%4\" Time=%5 DataType=217")
+                            .arg(deviceAddr).arg(item.gin.group).arg(item.gin.entry)
+                            .arg(point.value.toString())
+                            .arg(point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")));
                 break;
                 
             default:
