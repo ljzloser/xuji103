@@ -5,6 +5,7 @@
 #include "iec103/asdu/ASDU1.h"
 #include "iec103/asdu/ASDU7_8.h"
 #include "iec103/asdu/ASDU10_21.h"
+#include "iec103/asdu/ASDU11.h"
 #include "iec103/asdu/ASDU42.h"
 #include "iec103/transport/TcpTransport.h"
 #include "iec103/types/Constants.h"
@@ -22,6 +23,7 @@ IEC103Master::IEC103Master(QObject* parent)
     , m_testTimer(new QTimer(this))
     , m_ackTimer(new QTimer(this))
     , m_giTimer(new QTimer(this))
+    , m_kBlockTimer(new QTimer(this))
 {
     connect(m_transport, &TcpTransport::connected, this, &IEC103Master::onConnected);
     connect(m_transport, &TcpTransport::disconnected, this, &IEC103Master::onDisconnected);
@@ -42,6 +44,9 @@ IEC103Master::IEC103Master(QObject* parent)
     
     m_giTimer->setSingleShot(false);
     connect(m_giTimer, &QTimer::timeout, this, &IEC103Master::onGITimeout);
+    
+    m_kBlockTimer->setSingleShot(true);
+    connect(m_kBlockTimer, &QTimer::timeout, this, &IEC103Master::onKBlockTimeout);
 }
 
 IEC103Master::~IEC103Master()
@@ -51,13 +56,65 @@ IEC103Master::~IEC103Master()
 
 void IEC103Master::setConfig(const Config& config)
 {
+    // 参数校验 (参照南网规范附录A)
     m_config = config;
     
+    // k值校验: 1~32767 (南网规范附录A图表A.5)
+    if (m_config.maxUnconfirmed < 1 || m_config.maxUnconfirmed > 32767) {
+        qWarning() << "IEC103Master: Invalid maxUnconfirmed (k)=" << m_config.maxUnconfirmed 
+                   << ", using default 12";
+        m_config.maxUnconfirmed = 12;
+    }
+    
+    // w值校验: 1~32767, 建议 w ≤ 2k/3 (南网规范附录A图表A.5)
+    if (m_config.maxAckDelay < 1 || m_config.maxAckDelay > 32767) {
+        qWarning() << "IEC103Master: Invalid maxAckDelay (w)=" << m_config.maxAckDelay 
+                   << ", using default 8";
+        m_config.maxAckDelay = 8;
+    }
+    if (m_config.maxAckDelay > m_config.maxUnconfirmed * 2 / 3) {
+        qWarning() << "IEC103Master: maxAckDelay (w)=" << m_config.maxAckDelay 
+                   << " > 2k/3 (k=" << m_config.maxUnconfirmed << "), not recommended";
+    }
+    
+    // T0连接超时校验: 最小1秒 (南网规范附录A图表A.4)
+    if (m_config.connectTimeout < 1000) {
+        qWarning() << "IEC103Master: connectTimeout (T0)=" << m_config.connectTimeout 
+                   << "ms too short, using minimum 1000ms";
+        m_config.connectTimeout = 1000;
+    }
+    
+    // T1命令超时校验: 最小1秒 (南网规范附录A图表A.4)
+    if (m_config.timeout < 1000) {
+        qWarning() << "IEC103Master: timeout (T1)=" << m_config.timeout 
+                   << "ms too short, using minimum 1000ms";
+        m_config.timeout = 1000;
+    }
+    
+    // T2确认超时校验: 最小1秒, T2 < T1 (南网规范附录A图表A.4)
+    if (m_config.ackTimeout < 1000) {
+        qWarning() << "IEC103Master: ackTimeout (T2)=" << m_config.ackTimeout 
+                   << "ms too short, using minimum 1000ms";
+        m_config.ackTimeout = 1000;
+    }
+    if (m_config.ackTimeout >= m_config.timeout) {
+        qWarning() << "IEC103Master: ackTimeout (T2)=" << m_config.ackTimeout 
+                   << "ms >= timeout (T1)=" << m_config.timeout << "ms, should be T2 < T1";
+    }
+    
+    // T3测试间隔校验: 最小1秒 (南网规范附录A图表A.4)
+    if (m_config.testInterval < 1000) {
+        qWarning() << "IEC103Master: testInterval (T3)=" << m_config.testInterval 
+                   << "ms too short, using minimum 1000ms";
+        m_config.testInterval = 1000;
+    }
+    
     TcpTransport::Config transportConfig;
-    transportConfig.host = config.host;
-    transportConfig.port = config.port;
-    transportConfig.reconnectInterval = config.reconnectInterval;
+    transportConfig.host = m_config.host;
+    transportConfig.port = m_config.port;
+    transportConfig.reconnectInterval = m_config.reconnectInterval;
     transportConfig.autoReconnect = true;
+    transportConfig.maxReconnectCount = m_config.maxReconnectCount;
     m_transport->setConfig(transportConfig);
 }
 
@@ -76,6 +133,7 @@ void IEC103Master::disconnectFromServer()
 {
     m_connectTimer->stop();
     m_cmdTimer->stop();
+    m_kBlockTimer->stop();  // 停止k值阻塞超时定时器
     stopTestTimer();
     stopAckTimer();
     m_giTimer->stop();
@@ -113,8 +171,20 @@ void IEC103Master::generalInterrogation(uint16_t deviceAddr)
     if (unconfirmed >= m_config.maxUnconfirmed) {
         Logger::warning(QString("[k-Control] Send blocked: unconfirmed=%1 >= k=%2")
                         .arg(unconfirmed).arg(m_config.maxUnconfirmed));
+        // 启动k值阻塞超时定时器
+        if (!m_kBlockTimer->isActive()) {
+            m_kBlockTimer->start(m_config.timeout);
+            Logger::warning(QString("[k-Control] Block timeout timer started: %1ms").arg(m_config.timeout));
+        }
         return;
     }
+    
+    // k值阻塞解除，停止超时定时器
+    if (m_kBlockTimer->isActive()) {
+        m_kBlockTimer->stop();
+        Logger::info("[k-Control] Block cleared, timer stopped");
+    }
+    
     Logger::debug(QString("[k-Control] Before send: unconfirmed=%1, k=%2")
                   .arg(unconfirmed).arg(m_config.maxUnconfirmed));
 
@@ -130,6 +200,7 @@ void IEC103Master::generalInterrogation(uint16_t deviceAddr)
     m_giState.scn++;
 
     sendFrame(frame);
+    m_sendQueue.enqueue(sendSeq, frame);  // 入队待确认
     
     // 启动T1命令超时定时器
     m_cmdTimer->start(m_config.timeout);
@@ -155,8 +226,20 @@ void IEC103Master::readGenericGroup(uint16_t deviceAddr, uint8_t group)
     if (unconfirmed >= m_config.maxUnconfirmed) {
         Logger::warning(QString("[k-Control] Send blocked: unconfirmed=%1 >= k=%2")
                         .arg(unconfirmed).arg(m_config.maxUnconfirmed));
+        // 启动k值阻塞超时定时器
+        if (!m_kBlockTimer->isActive()) {
+            m_kBlockTimer->start(m_config.timeout);
+            Logger::warning(QString("[k-Control] Block timeout timer started: %1ms").arg(m_config.timeout));
+        }
         return;
     }
+    
+    // k值阻塞解除，停止超时定时器
+    if (m_kBlockTimer->isActive()) {
+        m_kBlockTimer->stop();
+        Logger::info("[k-Control] Block cleared, timer stopped");
+    }
+    
     Logger::debug(QString("[k-Control] Before send: unconfirmed=%1, k=%2")
                   .arg(unconfirmed).arg(m_config.maxUnconfirmed));
 
@@ -172,6 +255,7 @@ void IEC103Master::readGenericGroup(uint16_t deviceAddr, uint8_t group)
     m_genericState.group = group;
 
     sendFrame(frame);
+    m_sendQueue.enqueue(sendSeq, frame);  // 入队待确认
     
     // 启动T1命令超时定时器
     m_cmdTimer->start(m_config.timeout);
@@ -212,6 +296,7 @@ void IEC103Master::onDisconnected()
     
     // 重置序号管理器
     m_seqManager.reset();
+    m_sendQueue.clear();  // 清空发送队列
     m_giState.inProgress = false;
     m_genericState.inProgress = false;
     
@@ -239,17 +324,29 @@ void IEC103Master::onDataReceived(const QByteArray& data)
 
 void IEC103Master::onConnectTimeout()
 {
-    Logger::error(QString("[T0] Connection timeout (%1ms) - Disconnecting!").arg(m_config.connectTimeout));
-    disconnectFromServer();
+    QString reason = QString("Connection timeout (T0=%1ms)").arg(m_config.connectTimeout);
+    Logger::error(QString("[T0] ") + reason + " - Disconnecting!");
     
+    // 先通知应用层
     if (m_handler) {
-        m_handler->onError("Connection timeout (T0)");
+        m_handler->onDisconnected(reason);
+        m_handler->onError(reason);
     }
+    
+    disconnectFromServer();
 }
 
 void IEC103Master::onCmdTimeout()
 {
-    Logger::error(QString("[T1] Command timeout (%1ms) - Disconnecting!").arg(m_config.timeout));
+    QString reason = QString("Command timeout (T1=%1ms)").arg(m_config.timeout);
+    Logger::error(QString("[T1] ") + reason + " - Disconnecting!");
+    
+    // 先通知应用层
+    if (m_handler) {
+        m_handler->onDisconnected(reason);
+        m_handler->onError(reason);
+    }
+    
     disconnectFromServer();
 }
 
@@ -257,7 +354,15 @@ void IEC103Master::onTestTimeout()
 {
     // 检查上次 TESTFR 是否收到确认
     if (m_testFrPending) {
-        Logger::error("[TESTFR] No confirmation received within timeout - Disconnecting!");
+        QString reason = QString("TESTFR timeout (T1=%1ms)").arg(m_config.timeout);
+        Logger::error(QString("[TESTFR] ") + reason + " - Disconnecting!");
+        
+        // 先通知应用层
+        if (m_handler) {
+            m_handler->onDisconnected(reason);
+            m_handler->onError(reason);
+        }
+        
         disconnectFromServer();
         return;
     }
@@ -277,6 +382,21 @@ void IEC103Master::onGITimeout()
     if (isConnected()) {
         generalInterrogation(0);
     }
+}
+
+void IEC103Master::onKBlockTimeout()
+{
+    QString reason = QString("k-value block timeout (k=%1, timeout=%2ms)")
+                     .arg(m_config.maxUnconfirmed).arg(m_config.timeout);
+    Logger::error(QString("[k-Control] ") + reason + " - Disconnecting!");
+    
+    // 先通知应用层
+    if (m_handler) {
+        m_handler->onDisconnected(reason);
+        m_handler->onError(reason);
+    }
+    
+    disconnectFromServer();
 }
 // ========== Private methods ==========
 
@@ -366,6 +486,9 @@ void IEC103Master::processSFrame(const Frame& frame)
     uint16_t prevAck = m_seqManager.lastAckSeq();
     m_seqManager.setLastAckSeq(ackSeq);
 
+    // 从发送队列中移除已确认的帧
+    m_sendQueue.confirm(ackSeq);
+
     uint16_t confirmedCount = 0;
     if (ackSeq >= prevAck) {
         confirmedCount = ackSeq - prevAck;
@@ -420,6 +543,9 @@ void IEC103Master::processAsdu(const Asdu& asdu)
         break;
     case 10:
         processAsdu10(asdu);
+        break;
+    case 11:
+        processAsdu11(asdu);
         break;
     case 42:
         processAsdu42(asdu);
@@ -610,6 +736,27 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
                 m_handler->onGenericValue(point);
                 m_handler->onGenericData(deviceAddr, item);
             }
+        }
+    }
+}
+
+void IEC103Master::processAsdu11(const Asdu& asdu)
+{
+    Asdu11Parser parser;
+    if (parser.parse(asdu)) {
+        uint16_t deviceAddr = asdu.addr();
+        const Asdu11Data& data = parser.data();
+        
+        Logger::info(QString("Catalog (ASDU11): Dev=%1 Group=%2 Entry=%3 NGD=%4")
+                    .arg(deviceAddr).arg(data.gin.group).arg(data.gin.entry).arg(data.ngd));
+        
+        for (const auto& entry : data.entries) {
+            Logger::debug(QString("  KOD=%1(%2) DataType=%3 Size=%4 Number=%5")
+                         .arg(entry.kod, 2, 16, QChar('0'))
+                         .arg(entry.kodDescription())
+                         .arg(entry.gdd.dataType)
+                         .arg(entry.gdd.dataSize)
+                         .arg(entry.gdd.number));
         }
     }
 }

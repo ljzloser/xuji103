@@ -51,6 +51,12 @@ public:
 
     // 断开连接
     virtual void onDisconnected() {}
+    
+    // 带原因的断开连接通知
+    virtual void onDisconnected(const QString& reason) {
+        (void)reason;
+        onDisconnected();  // 默认调用无参版本
+    }
 
     // 发生错误
     virtual void onError(const QString& error) {

@@ -87,6 +87,7 @@ namespace IEC103
 
     void TcpTransport::onSocketConnected()
     {
+        m_reconnectCount = 0;  // 连接成功，重置重连计数
         setState(LinkState::Connected);
         emit connected();
     }
@@ -97,10 +98,19 @@ namespace IEC103
         m_receiveBuffer.clear();
         emit disconnected();
 
-        // 自动重连
+        // 自动重连（检查次数限制）
         if (m_config.autoReconnect)
         {
-            startReconnectTimer();
+            if (m_config.maxReconnectCount == 0 || m_reconnectCount < m_config.maxReconnectCount)
+            {
+                m_reconnectCount++;
+                startReconnectTimer();
+            }
+            else
+            {
+                qWarning() << "TcpTransport: Max reconnect count (" << m_config.maxReconnectCount << ") reached";
+                emit reconnectFailed();
+            }
         }
     }
 
@@ -129,10 +139,19 @@ namespace IEC103
         setState(LinkState::Disconnected); // 改为Disconnected状态以便重连
         emit errorOccurred(err);
 
-        // 连接失败后自动重连
+        // 连接失败后自动重连（检查次数限制）
         if (m_config.autoReconnect)
         {
-            startReconnectTimer();
+            if (m_config.maxReconnectCount == 0 || m_reconnectCount < m_config.maxReconnectCount)
+            {
+                m_reconnectCount++;
+                startReconnectTimer();
+            }
+            else
+            {
+                qWarning() << "TcpTransport: Max reconnect count (" << m_config.maxReconnectCount << ") reached";
+                emit reconnectFailed();
+            }
         }
     }
 

@@ -6,6 +6,7 @@
 #include "callback/IDataHandler.h"
 #include "apci/Frame.h"
 #include "apci/SeqManager.h"
+#include "apci/SendQueue.h"
 #include "asdu/ASDU.h"
 #include <QObject>
 #include <QTimer>
@@ -31,6 +32,7 @@ public:
         int testInterval = 20000;      // T3测试间隔
         int maxUnconfirmed = 12;       // k值
         int maxAckDelay = 8;           // w值
+        int maxReconnectCount = 10;    // 最大重连次数，0=无限
     };
 
     explicit IEC103Master(QObject* parent = nullptr);
@@ -76,6 +78,7 @@ private slots:
     void onTestTimeout();
     void onAckTimeout();
     void onGITimeout();
+    void onKBlockTimeout();  // k值阻塞超时
 
 private:
     // 帧处理
@@ -90,6 +93,7 @@ private:
     void processAsdu2(const Asdu& asdu);
     void processAsdu8(const Asdu& asdu);
     void processAsdu10(const Asdu& asdu);
+    void processAsdu11(const Asdu& asdu);
     void processAsdu42(const Asdu& asdu);
 
     // 发送方法
@@ -108,6 +112,7 @@ private:
     Config m_config;
     class TcpTransport* m_transport;
     SeqManager m_seqManager;
+    SendQueue m_sendQueue;  // 发送队列
     IDataHandler* m_handler = nullptr;
 
     LinkState m_state = LinkState::Disconnected;
@@ -119,6 +124,7 @@ private:
     QTimer* m_testTimer;
     QTimer* m_ackTimer;
     QTimer* m_giTimer;
+    QTimer* m_kBlockTimer;   // k值阻塞超时
 
     // 总召唤状态
     struct GIState {

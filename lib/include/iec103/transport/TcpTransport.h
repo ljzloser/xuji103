@@ -21,6 +21,7 @@ public:
         int readTimeout = 15000;
         int reconnectInterval = 5000;
         bool autoReconnect = true;
+        int maxReconnectCount = 10;  // 最大重连次数，0=无限
     };
 
     explicit TcpTransport(QObject* parent = nullptr);
@@ -45,6 +46,7 @@ signals:
     void errorOccurred(const QString& error);
     void stateChanged(LinkState state);
     void dataReceived(const QByteArray& data);
+    void reconnectFailed();  // 达到最大重连次数
 
 private slots:
     void onSocketConnected();
@@ -64,6 +66,7 @@ private:
     QTimer* m_reconnectTimer;
     QByteArray m_receiveBuffer;
     LinkState m_state = LinkState::Disconnected;
+    int m_reconnectCount = 0;  // 当前重连次数
 };
 
 } // namespace IEC103

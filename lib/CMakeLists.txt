@@ -3,10 +3,12 @@
 set(IEC103_SOURCES
     src/apci/FrameCodec.cpp
     src/apci/SeqManager.cpp
+    src/apci/SendQueue.cpp
     src/asdu/ASDU.cpp
     src/asdu/DigitalParser.cpp
     src/asdu/GIParser.cpp
     src/asdu/DataParser.cpp
+    src/asdu/ASDU11.cpp
     src/transport/TcpTransport.cpp
     src/transport/Reconnector.cpp
     src/master/IEC103Master.cpp
@@ -22,10 +24,12 @@ set(IEC103_HEADERS
     include/iec103/apci/APCI.h
     include/iec103/apci/Frame.h
     include/iec103/apci/SeqManager.h
+    include/iec103/apci/SendQueue.h
     include/iec103/asdu/ASDU.h
     include/iec103/asdu/ASDU1.h
     include/iec103/asdu/ASDU7_8.h
     include/iec103/asdu/ASDU10_21.h
+    include/iec103/asdu/ASDU11.h
     include/iec103/asdu/ASDU42.h
     include/iec103/callback/IDataHandler.h
     include/iec103/transport/TcpTransport.h
