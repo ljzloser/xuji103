@@ -17,6 +17,7 @@ namespace IEC103 {
 
 // 前向声明
 class TcpTransport;
+class Logger;
 
 // IEC103主站类
 class IEC103Master : public QObject {
@@ -54,13 +55,15 @@ public:
     // 数据回调
     void setDataHandler(IDataHandler* handler);
 
-    // 日志回调（全局设置，对所有IEC103Master实例生效）
-    static void setLogHandler(ILogHandler* handler);
-    static void setLogLevel(LogLevel level);
+    // 日志回调（每个IEC103Master实例独立）
+    void setLogHandler(ILogHandler* handler);
+    void setLogLevel(LogLevel level);
+    LogLevel logLevel() const;
 
     // 数据召唤
-    void generalInterrogation(uint16_t deviceAddr = 0);
-    void readGenericGroup(uint16_t deviceAddr, uint8_t group);
+    // deviceAddr: 设备编号 (0=子站本身, 1-254=装置编号, 255=广播)
+    void generalInterrogation(uint8_t deviceAddr = 0);
+    void readGenericGroup(uint8_t deviceAddr, uint8_t group);
 
     // 周期性总召唤
     void startPeriodicGI(int intervalMs);
@@ -71,7 +74,7 @@ signals:
     void disconnected();
     void errorOccurred(const QString& error);
     void stateChanged(LinkState state);
-    void giFinished(uint16_t deviceAddr);
+    void giFinished(uint8_t deviceAddr);  // 设备编号
 
 private slots:
     void onConnected();
@@ -119,6 +122,7 @@ private:
     SeqManager m_seqManager;
     SendQueue m_sendQueue;  // 发送队列
     IDataHandler* m_handler = nullptr;
+    Logger* m_logger = nullptr;  // 日志器（实例独立）
 
     LinkState m_state = LinkState::Disconnected;
     bool m_startDtReceived = false;
@@ -134,14 +138,14 @@ private:
     // 总召唤状态
     struct GIState {
         bool inProgress = false;
-        uint16_t deviceAddr = 0;
+        uint16_t asduAddr = 0;    // 完整ASDU地址 (高字节=设备编号)
         uint8_t scn = 0;
     } m_giState;
 
     // 通用服务状态
     struct GenericState {
         bool inProgress = false;
-        uint16_t deviceAddr = 0;
+        uint16_t asduAddr = 0;    // 完整ASDU地址 (高字节=设备编号)
         uint8_t group = 0;
     } m_genericState;
 };

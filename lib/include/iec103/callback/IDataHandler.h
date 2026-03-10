@@ -30,13 +30,14 @@ public:
     }
 
     // 通用分类数据 (原始格式)
-    virtual void onGenericData(uint16_t deviceAddr, const GenericDataItem& item) {
-        (void)deviceAddr; (void)item;
+    // asduAddr: 完整ASDU地址 (高字节=设备编号)
+    virtual void onGenericData(uint16_t asduAddr, const GenericDataItem& item) {
+        (void)asduAddr; (void)item;
     }
 
     // 通用分类数据集
-    virtual void onGenericDataSet(uint16_t deviceAddr, const GenericDataSet& dataset) {
-        (void)deviceAddr; (void)dataset;
+    virtual void onGenericDataSet(uint16_t asduAddr, const GenericDataSet& dataset) {
+        (void)asduAddr; (void)dataset;
     }
 
     // ========== 链路状态回调 ==========
@@ -66,19 +67,20 @@ public:
     // ========== 总召唤回调 ==========
 
     // 总召唤开始
-    virtual void onGIStarted(uint16_t deviceAddr) {
+    // deviceAddr: 设备编号 (0=子站本身, 1-254=装置编号)
+    virtual void onGIStarted(uint8_t deviceAddr) {
         (void)deviceAddr;
     }
 
     // 总召唤完成
-    virtual void onGICompleted(uint16_t deviceAddr) {
+    virtual void onGICompleted(uint8_t deviceAddr) {
         (void)deviceAddr;
     }
 
     // ========== 通用分类召唤回调 ==========
 
     // 通用分类召唤完成
-    virtual void onGenericGICompleted(uint16_t deviceAddr, uint8_t group) {
+    virtual void onGenericGICompleted(uint8_t deviceAddr, uint8_t group) {
         (void)deviceAddr; (void)group;
     }
 };

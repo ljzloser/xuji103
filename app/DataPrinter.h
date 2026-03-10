@@ -21,11 +21,11 @@ public:
     
     // 通用服务回调 (遥测/遥脉统一)
     void onGenericValue(const IEC103::GenericPoint& point) override;
-    void onGenericData(uint16_t deviceAddr, const IEC103::GenericDataItem& item) override;
+    void onGenericData(uint16_t asduAddr, const IEC103::GenericDataItem& item) override;
     
     // 总召唤回调
-    void onGIStarted(uint16_t deviceAddr) override;
-    void onGICompleted(uint16_t deviceAddr) override;
+    void onGIStarted(uint8_t deviceAddr) override;
+    void onGICompleted(uint8_t deviceAddr) override;
 
 private:
     QString formatQuality(const IEC103::Quality& quality);

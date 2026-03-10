@@ -28,7 +28,7 @@ public:
     const std::vector<Result>& results() const { return m_results; }
 
     // 转换为DigitalPoint
-    DigitalPoint toDigitalPoint(const Result& result, uint16_t deviceAddr) const;
+    DigitalPoint toDigitalPoint(const Result& result, uint16_t asduAddr) const;
 
 private:
     std::vector<Result> m_results;

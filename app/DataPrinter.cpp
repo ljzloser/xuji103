@@ -80,7 +80,7 @@ void DataPrinter::onDoublePoint(const IEC103::DigitalPoint& point)
 
     qInfo().noquote() << QString("[%1] [DIGITAL] Dev=%2 FUN=%3 INF=%4 Value=%5 Quality=%6 EventTime=%7 RecvTime=%8")
         .arg(ts())
-        .arg(point.deviceAddr)
+        .arg(point.deviceAddr())
         .arg(QString::number(point.fun, 16).toUpper())
         .arg(QString::number(point.inf, 16).toUpper())
         .arg(valueStr)
@@ -108,7 +108,7 @@ void DataPrinter::onGenericValue(const IEC103::GenericPoint& point)
     
     qInfo().noquote() << QString("[%1] [GENERIC] Dev=%2 Group=%3 Entry=%4 Value=%5 Unit=%6 Type=%7 Quality=%8 Desc=%9")
         .arg(ts())
-        .arg(point.deviceAddr)
+        .arg(point.deviceAddr())
         .arg(point.group)
         .arg(point.entry)
         .arg(valueStr)
@@ -118,23 +118,24 @@ void DataPrinter::onGenericValue(const IEC103::GenericPoint& point)
         .arg(point.description);
 }
 
-void DataPrinter::onGenericData(uint16_t deviceAddr, const IEC103::GenericDataItem& item)
+void DataPrinter::onGenericData(uint16_t asduAddr, const IEC103::GenericDataItem& item)
 {
+    uint8_t devAddr = (asduAddr >> 8) & 0xFF;
     qInfo().noquote() << QString("[%1] [GENERIC_RAW] Dev=%2 GIN=%3/%4 DataType=%5 Size=%6")
         .arg(ts())
-        .arg(deviceAddr)
+        .arg(devAddr)
         .arg(item.gin.group)
         .arg(item.gin.entry)
         .arg(static_cast<int>(item.gdd.dataType))
         .arg(item.gdd.dataSize);
 }
 
-void DataPrinter::onGIStarted(uint16_t deviceAddr)
+void DataPrinter::onGIStarted(uint8_t deviceAddr)
 {
     qInfo().noquote() << QString("[%1] [GI] Started for device %2").arg(ts()).arg(deviceAddr);
 }
 
-void DataPrinter::onGICompleted(uint16_t deviceAddr)
+void DataPrinter::onGICompleted(uint8_t deviceAddr)
 {
     qInfo().noquote() << QString("[%1] [GI] Completed for device %2").arg(ts()).arg(deviceAddr);
 }

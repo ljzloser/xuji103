@@ -59,35 +59,39 @@ CP56Time2a GenericDataItem::toCP56Time2a() const {
 }
 
 // ========== 南网扩展数据类型解析方法 (DataType 213-217) ==========
+// 参考：南网规范 图表29 故障量数据上传定义
 
 QDateTime GenericDataItem::absoluteTime() const {
     // DataType 213 (0xD5): 带绝对时间七字节时标报文
-    // 格式: CP56Time2a (7字节)
-    if (gdd.dataType == static_cast<uint8_t>(DataType::TimeTagMsg7) && gid.size() >= 7) {
+    // 格式: DPI(1字节,低2位) + RES(6位) + CP56Time2a(7字节) + CP56Time2a(7字节) + SIN(1字节) = 17字节
+    // 实际时标从偏移1开始
+    if (gdd.dataType == static_cast<uint8_t>(DataType::TimeTagMsg7) && gid.size() >= 15) {
         CP56Time2a ts;
-        memcpy(&ts, gid.data(), 7);
+        memcpy(&ts, gid.data() + 1, 7);  // 实际发生时间
         return ts.toDateTime();
     }
     return QDateTime();
 }
 
-QDateTime GenericDataItem::relativeTime() const {
+QDateTime GenericDataItem::relativeTimeTag() const {
     // DataType 214 (0xD6): 带相对时间七字节时标报文
-    // 格式: CP56Time2a (7字节) - 相对时间
-    if (gdd.dataType == static_cast<uint8_t>(DataType::TimeTagMsgRel7) && gid.size() >= 7) {
+    // 格式: DPI(1) + RES(6位) + RET(2) + NOF(2) + CP56Time2a(7) + CP56Time2a(7) + SIN(1) = 21字节
+    if (gdd.dataType == static_cast<uint8_t>(DataType::TimeTagMsgRel7) && gid.size() >= 14) {
         CP56Time2a ts;
-        memcpy(&ts, gid.data(), 7);
+        memcpy(&ts, gid.data() + 7, 7);  // 实际发生时间，偏移7
         return ts.toDateTime();
     }
     return QDateTime();
 }
+
+// ========== DataType 215: 带相对时间七字节时标的浮点值 ==========
+// 格式: VAL(4) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 22字节
+// 参考：南网规范 图表29
 
 float GenericDataItem::floatWithTime() const {
-    // DataType 215 (0xD7): 带相对时间七字节时标的浮点值
-    // 格式: CP56Time2a (7字节) + float (4字节) = 11字节
-    if (gdd.dataType == static_cast<uint8_t>(DataType::FloatTimeTag7) && gid.size() >= 11) {
+    if (gdd.dataType == static_cast<uint8_t>(DataType::FloatTimeTag7) && gid.size() >= 4) {
         uint32_t val = 0;
-        memcpy(&val, gid.data() + 7, 4);  // 跳过前7字节时标
+        memcpy(&val, gid.data(), 4);  // 浮点值在偏移0-3
         float result;
         memcpy(&result, &val, 4);
         return result;
@@ -95,25 +99,91 @@ float GenericDataItem::floatWithTime() const {
     return 0.0f;
 }
 
+uint16_t GenericDataItem::relativeTimeMs() const {
+    // 相对时间RET在偏移4-5 (仅对DataType 215/216/217有效)
+    if ((gdd.dataType == static_cast<uint8_t>(DataType::FloatTimeTag7) ||
+         gdd.dataType == static_cast<uint8_t>(DataType::IntTimeTag7) ||
+         gdd.dataType == static_cast<uint8_t>(DataType::CharTimeTag7)) && gid.size() >= 6) {
+        return gid[4] | (gid[5] << 8);
+    }
+    return 0;
+}
+
+uint16_t GenericDataItem::faultSequenceNo() const {
+    // 电网故障序号NOF在偏移6-7 (仅对DataType 215/216/217有效)
+    if ((gdd.dataType == static_cast<uint8_t>(DataType::FloatTimeTag7) ||
+         gdd.dataType == static_cast<uint8_t>(DataType::IntTimeTag7) ||
+         gdd.dataType == static_cast<uint8_t>(DataType::CharTimeTag7)) && gid.size() >= 8) {
+        return gid[6] | (gid[7] << 8);
+    }
+    return 0;
+}
+
+CP56Time2a GenericDataItem::eventTimeTag() const {
+    // 故障时间CP56Time2a在偏移8-14 (仅对DataType 215/216/217有效)
+    CP56Time2a ts;
+    if ((gdd.dataType == static_cast<uint8_t>(DataType::FloatTimeTag7) ||
+         gdd.dataType == static_cast<uint8_t>(DataType::IntTimeTag7) ||
+         gdd.dataType == static_cast<uint8_t>(DataType::CharTimeTag7)) && gid.size() >= 15) {
+        memcpy(&ts, gid.data() + 8, 7);
+    }
+    return ts;
+}
+
+CP56Time2a GenericDataItem::recvTimeTag() const {
+    // 子站接收时间CP56Time2a在偏移15-21 (仅对DataType 215/216有效)
+    CP56Time2a ts;
+    if ((gdd.dataType == static_cast<uint8_t>(DataType::FloatTimeTag7) ||
+         gdd.dataType == static_cast<uint8_t>(DataType::IntTimeTag7)) && gid.size() >= 22) {
+        memcpy(&ts, gid.data() + 15, 7);
+    }
+    return ts;
+}
+
+// ========== DataType 216: 带相对时间七字节时标的整形值 ==========
+// 格式: VAL(4, 其中低字节FPT, 高字节JPT) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 22字节
+
 int32_t GenericDataItem::intWithTime() const {
-    // DataType 216 (0xD8): 带相对时间七字节时标的整形值
-    // 格式: CP56Time2a (7字节) + int32 (4字节) = 11字节
-    if (gdd.dataType == static_cast<uint8_t>(DataType::IntTimeTag7) && gid.size() >= 11) {
+    if (gdd.dataType == static_cast<uint8_t>(DataType::IntTimeTag7) && gid.size() >= 4) {
         int32_t val = 0;
-        memcpy(&val, gid.data() + 7, 4);  // 跳过前7字节时标
+        memcpy(&val, gid.data(), 4);  // 整形值在偏移0-3
         return val;
     }
     return 0;
 }
 
+uint8_t GenericDataItem::fptValue() const {
+    // FPT(故障相别及类型)在VAL的低位字节(偏移0)
+    if (gdd.dataType == static_cast<uint8_t>(DataType::IntTimeTag7) && gid.size() >= 1) {
+        return gid[0];
+    }
+    return 0;
+}
+
+uint8_t GenericDataItem::jptValue() const {
+    // JPT(跳闸相别)在VAL的第二字节(偏移1)
+    if (gdd.dataType == static_cast<uint8_t>(DataType::IntTimeTag7) && gid.size() >= 2) {
+        return gid[1];
+    }
+    return 0;
+}
+
+// ========== DataType 217: 带相对时间七字节时标的字符值 ==========
+// 格式: VAL(40字节ASCII) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 58字节
+
 QString GenericDataItem::stringWithTime() const {
-    // DataType 217 (0xD9): 带相对时间七字节时标的字符值
-    // 格式: CP56Time2a (7字节) + ASCII字符串
-    if (gdd.dataType == static_cast<uint8_t>(DataType::CharTimeTag7) && gid.size() > 7) {
-        return QString::fromLatin1(reinterpret_cast<const char*>(gid.data() + 7), 
-                                   static_cast<int>(gid.size() - 7));
+    if (gdd.dataType == static_cast<uint8_t>(DataType::CharTimeTag7) && gid.size() >= 40) {
+        // 字符值在偏移0-39，共40字节
+        return QString::fromLatin1(reinterpret_cast<const char*>(gid.data()), 40);
     }
     return QString();
+}
+
+// ========== 兼容旧接口(已废弃) ==========
+
+QDateTime GenericDataItem::relativeTime() const {
+    // 保持向后兼容，实际应使用 relativeTimeTag()
+    return relativeTimeTag();
 }
 
 // ========== Asdu10Parser 实现 ==========

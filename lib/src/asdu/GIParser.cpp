@@ -42,7 +42,7 @@ bool Asdu8Parser::parse(const Asdu& asdu) {
         return false;
     }
 
-    m_result.deviceAddr = asdu.addr();
+    m_result.asduAddr = asdu.addr();
     m_result.scn = static_cast<uint8_t>(info[2]);
 
     return true;
@@ -102,11 +102,11 @@ bool Asdu42Parser::parse(const Asdu& asdu) {
     return !m_infoObjects.empty();
 }
 
-std::vector<DigitalPoint> Asdu42Parser::toDigitalPoints(uint16_t deviceAddr) const {
+std::vector<DigitalPoint> Asdu42Parser::toDigitalPoints(uint16_t asduAddr) const {
     std::vector<DigitalPoint> points;
     for (const auto& obj : m_infoObjects) {
         DigitalPoint point;
-        point.deviceAddr = deviceAddr;
+        point.asduAddr = asduAddr;
         point.fun = obj.fun;
         point.inf = obj.inf;
         point.infoAddr = (obj.fun << 8) | obj.inf;
@@ -119,13 +119,13 @@ std::vector<DigitalPoint> Asdu42Parser::toDigitalPoints(uint16_t deviceAddr) con
 
 // ========== Asdu42Builder 实现 ==========
 
-Asdu Asdu42Builder::build(uint16_t deviceAddr, uint8_t scn,
+Asdu Asdu42Builder::build(uint16_t asduAddr, uint8_t scn,
                           const std::vector<Asdu42Parser::InfoObject>& objects) {
     Asdu asdu;
     asdu.setTi(42);
     asdu.setVsq(false, static_cast<uint8_t>(objects.size()));
     asdu.setCot(static_cast<uint16_t>(COT::GeneralInterrogation));
-    asdu.setAddr(deviceAddr);
+    asdu.setAddr(asduAddr);
 
     QByteArray info;
     for (const auto& obj : objects) {

@@ -40,11 +40,11 @@ constexpr uint16_t MAX_SEQ_NUMBER = 32767;      // 最大序号 (15位)
 constexpr uint8_t MAX_UNCONFIRMED_I = 12;       // k值: 最大未确认I格式APDU
 constexpr uint8_t MAX_ACK_DELAY_W = 8;          // w值: 最大确认延迟
 
-// ASDU地址
-constexpr uint16_t ASDU_ADDR_SUBSTATION = 0x0000;  // 子站本身
-constexpr uint16_t ASDU_ADDR_BROADCAST = 0x00FF;   // 广播地址
-constexpr uint16_t ASDU_ADDR_MIN = 0x0001;         // 最小装置地址
-constexpr uint16_t ASDU_ADDR_MAX = 0x00FE;         // 最大装置地址
+// ASDU地址 (南网规范: 高字节=设备地址, 低字节D7-D3=定值区号, D2-D0=CPU号)
+constexpr uint16_t ASDU_ADDR_SUBSTATION = 0x0000;  // 子站本身 (高字节=0x00)
+constexpr uint16_t ASDU_ADDR_BROADCAST = 0xFF00;   // 广播地址 (高字节=0xFF)
+constexpr uint16_t ASDU_ADDR_MIN = 0x0100;         // 最小装置地址 (设备1)
+constexpr uint16_t ASDU_ADDR_MAX = 0xFE00;         // 最大装置地址 (设备254)
 
 // 通用服务 INF (控制方向)
 constexpr uint8_t INF_READ_ALL_GROUPS = 0xF0;      // 读全部组的标题

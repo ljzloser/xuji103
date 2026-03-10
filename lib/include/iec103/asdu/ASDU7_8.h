@@ -21,8 +21,11 @@ public:
 class Asdu8Parser : public AsduParser {
 public:
     struct Result {
-        uint16_t deviceAddr = 0;
+        uint16_t asduAddr = 0;    // ASDU公共地址 (完整2字节)
         uint8_t scn = 0;
+
+        // 设备地址 (高字节)
+        uint8_t deviceAddr() const { return (asduAddr >> 8) & 0xFF; }
     };
 
     bool parse(const Asdu& asdu) override;

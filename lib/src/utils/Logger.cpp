@@ -4,28 +4,27 @@
 
 namespace IEC103 {
 
-LogLevel Logger::s_level = LogLevel::Info;
-ILogHandler* Logger::s_handler = nullptr;
-
-static QString timestamp() {
-    return QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
+Logger::Logger()
+    : m_level(LogLevel::Info)
+    , m_handler(nullptr)
+{
 }
 
 void Logger::log(LogLevel level, const QString& msg) {
-    if (s_level > level) {
+    if (m_level > level) {
         return;  // 日志级别过滤
     }
     
-    QString ts = timestamp();
+    QString ts = QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz");
     
     // 如果设置了回调处理器，使用回调
-    if (s_handler) {
+    if (m_handler) {
         LogRecord record;
         record.level = level;
         record.message = msg;
         record.timestamp = ts;
         record.dateTime = QDateTime::currentDateTime();
-        s_handler->onLog(record);
+        m_handler->onLog(record);
         return;
     }
     

@@ -28,7 +28,7 @@ public:
     uint8_t scn() const { return m_scn; }
 
     // 转换为DigitalPoint列表
-    std::vector<DigitalPoint> toDigitalPoints(uint16_t deviceAddr) const;
+    std::vector<DigitalPoint> toDigitalPoints(uint16_t asduAddr) const;
 
 private:
     std::vector<InfoObject> m_infoObjects;
@@ -38,7 +38,7 @@ private:
 // ASDU42构建器 (用于测试)
 class Asdu42Builder {
 public:
-    static Asdu build(uint16_t deviceAddr, uint8_t scn,
+    static Asdu build(uint16_t asduAddr, uint8_t scn,
                       const std::vector<Asdu42Parser::InfoObject>& objects);
 };
 

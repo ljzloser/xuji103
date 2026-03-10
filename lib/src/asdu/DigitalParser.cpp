@@ -45,9 +45,9 @@ bool Asdu1Parser::parse(const Asdu& asdu) {
     return !m_results.empty();
 }
 
-DigitalPoint Asdu1Parser::toDigitalPoint(const Result& result, uint16_t deviceAddr) const {
+DigitalPoint Asdu1Parser::toDigitalPoint(const Result& result, uint16_t asduAddr) const {
     DigitalPoint point;
-    point.deviceAddr = deviceAddr;
+    point.asduAddr = asduAddr;
     point.fun = result.fun;
     point.inf = result.inf;
     point.infoAddr = (result.fun << 8) | result.inf;

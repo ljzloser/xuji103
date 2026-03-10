@@ -12,7 +12,7 @@ namespace IEC103 {
 
 // 遥信数据点 (双点信息)
 struct DigitalPoint {
-    uint16_t deviceAddr = 0;      // 设备地址
+    uint16_t asduAddr = 0;        // ASDU公共地址 (完整2字节)
     uint8_t fun = 0;              // 功能类型
     uint8_t inf = 0;              // 信息序号
     uint16_t infoAddr = 0;        // 信息体地址 (FUN<<8 | INF)
@@ -21,6 +21,22 @@ struct DigitalPoint {
     QDateTime eventTime;          // 事件发生时间
     QDateTime recvTime;           // 子站接收时间
     uint8_t sin = 0;              // 附加信息
+
+    // ========== 地址解析方法 (南网规范) ==========
+
+    // 设备地址 (高字节)
+    uint8_t deviceAddr() const { return (asduAddr >> 8) & 0xFF; }
+
+    // CPU号 (低3位)
+    uint8_t cpuNo() const { return asduAddr & 0x07; }
+
+    // 定值区号 (D7-D3)
+    uint8_t settingZone() const { return (asduAddr >> 3) & 0x1F; }
+
+    // 设置地址
+    void setAddr(uint8_t device, uint8_t cpu = 0) {
+        asduAddr = (static_cast<uint16_t>(device) << 8) | (cpu & 0x07);
+    }
 
     // 便捷方法
     bool isOn() const { return value == DoublePointValue::On; }
@@ -38,7 +54,7 @@ struct DigitalPoint {
 // 通用服务数据点 (遥测/遥脉统一)
 // 数据类型由GDD.DataType决定: 7=浮点数(遥测), 3=无符号整数(遥脉)
 struct GenericPoint {
-    uint16_t deviceAddr = 0;      // 设备地址
+    uint16_t asduAddr = 0;        // ASDU公共地址 (完整2字节)
     uint8_t group = 0;            // 组号
     uint8_t entry = 0;            // 条目号
     uint8_t dataType = 0;         // GDD.DataType: 7=浮点, 3=整数
@@ -47,6 +63,22 @@ struct GenericPoint {
     QString unit;                 // 单位
     QString description;          // 描述
     QDateTime timestamp;          // 时间戳
+
+    // ========== 地址解析方法 (南网规范) ==========
+
+    // 设备地址 (高字节)
+    uint8_t deviceAddr() const { return (asduAddr >> 8) & 0xFF; }
+
+    // CPU号 (低3位)
+    uint8_t cpuNo() const { return asduAddr & 0x07; }
+
+    // 定值区号 (D7-D3)
+    uint8_t settingZone() const { return (asduAddr >> 3) & 0x1F; }
+
+    // 设置地址
+    void setAddr(uint8_t device, uint8_t cpu = 0) {
+        asduAddr = (static_cast<uint16_t>(device) << 8) | (cpu & 0x07);
+    }
 
     bool isValid() const { return quality.isGood(); }
     bool isFloat() const { return dataType == 7; }
@@ -101,20 +133,43 @@ struct GenericDataItem {
     GDD gdd;                      // 数据描述
     std::vector<uint8_t> gid;     // 数据内容
 
-    // 便捷解析方法
-    float toFloat() const;
-    int32_t toInt32() const;
-    uint32_t toUInt32() const;
-    QString toAsciiString() const;
-    DoublePointValue toDPI() const;
-    CP56Time2a toCP56Time2a() const;
+    // ========== 基本数据类型解析方法 ==========
+    float toFloat() const;              // DataType 7: R32.23浮点数
+    int32_t toInt32() const;            // DataType 4: 有符号整数
+    uint32_t toUInt32() const;          // DataType 3: 无符号整数
+    QString toAsciiString() const;      // DataType 1: ASCII字符串
+    DoublePointValue toDPI() const;     // DataType 9: 双点信息
+    CP56Time2a toCP56Time2a() const;    // 7字节时标
+
+    // ========== 南网扩展数据类型解析方法 (DataType 213-217) ==========
+    // 参考：南网规范 图表29 故障量数据上传定义
     
-    // 南网扩展数据类型解析方法 (DataType 213-217)
-    QDateTime absoluteTime() const;   // DataType 213: 带绝对时间七字节时标报文
-    QDateTime relativeTime() const;   // DataType 214: 带相对时间七字节时标报文
-    float floatWithTime() const;      // DataType 215: 带相对时间七字节时标的浮点值
-    int32_t intWithTime() const;      // DataType 216: 带相对时间七字节时标的整形值
-    QString stringWithTime() const;   // DataType 217: 带相对时间七字节时标的字符值
+    // DataType 213: 带绝对时间七字节时标报文
+    // 格式: DPI + RES + CP56Time2a + CP56Time2a + SIN = 17字节
+    QDateTime absoluteTime() const;
+    
+    // DataType 214: 带相对时间七字节时标报文
+    // 格式: DPI + RES + RET(2) + NOF(2) + CP56Time2a + CP56Time2a + SIN = 21字节
+    QDateTime relativeTimeTag() const;  // 返回实际发生时间
+    QDateTime relativeTime() const;     // 兼容旧接口(已废弃)
+    
+    // DataType 215: 带相对时间七字节时标的浮点值
+    // 格式: VAL(4) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 22字节
+    float floatWithTime() const;        // 浮点值(偏移0-3)
+    uint16_t relativeTimeMs() const;    // 相对时间ms(偏移4-5)
+    uint16_t faultSequenceNo() const;   // 故障序号(偏移6-7)
+    CP56Time2a eventTimeTag() const;    // 故障时间(偏移8-14)
+    CP56Time2a recvTimeTag() const;     // 子站接收时间(偏移15-21)
+    
+    // DataType 216: 带相对时间七字节时标的整形值
+    // 格式: VAL(4,FPT+JPT) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 22字节
+    int32_t intWithTime() const;        // 整形值(偏移0-3)
+    uint8_t fptValue() const;           // FPT故障相别及类型(偏移0)
+    uint8_t jptValue() const;           // JPT跳闸相别(偏移1)
+    
+    // DataType 217: 带相对时间七字节时标的字符值
+    // 格式: VAL(40) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 58字节
+    QString stringWithTime() const;     // 字符值(偏移0-39)
 };
 
 // 通用分类数据集
@@ -132,12 +187,15 @@ struct GenericDataSet {
 
 // 设备信息
 struct DeviceInfo {
-    uint16_t address = 0;         // 设备地址
+    uint16_t asduAddr = 0;        // ASDU公共地址 (完整2字节)
     QString name;                 // 设备名称
     QString manufacturer;         // 制造商
     QString model;                // 型号
     QString firmware;             // 固件版本
     uint8_t compatibility = 0;    // 兼容级别
+
+    // 设备地址 (高字节)
+    uint8_t deviceAddr() const { return (asduAddr >> 8) & 0xFF; }
 };
 
 }
