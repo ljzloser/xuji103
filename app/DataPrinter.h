@@ -3,14 +3,21 @@
 
 #include "iec103/callback/IDataHandler.h"
 #include <QObject>
+#include <QFile>
+#include <QTextStream>
 
 class DataPrinter : public QObject, public IEC103::IDataHandler {
     Q_OBJECT
 
 public:
     explicit DataPrinter(QObject* parent = nullptr);
+    ~DataPrinter();
+    
+    // 设置日志文件路径
+    void setLogFile(const QString& path);
     
     // IDataHandler 接口实现
+    void onRawFrame(const QByteArray& data, bool direction) override;
     void onConnected() override;
     void onDisconnected() override;
     void onError(const QString& error) override;
@@ -30,6 +37,10 @@ public:
 private:
     QString formatQuality(const IEC103::Quality& quality);
     QString formatTimestamp(const IEC103::CP56Time2a& ts);
+    void writeLog(const QString& line);
+    
+    QFile m_logFile;
+    QTextStream m_logStream;
 };
 
 #endif // XUJI103_DATAPRINTER_H

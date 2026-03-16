@@ -7,6 +7,14 @@
 - 组2: 装置状态量（状态信息，整数）
 - 组3: 装置定值（定值数据，混合类型）
 - 组4: 软压板（布尔状态，整数）
+- 组100: 南网扩展数据类型测试 (DataType 213-217)
+
+南网扩展数据类型:
+- DataType 213: 带绝对时间七字节时标报文
+- DataType 214: 带相对时间七字节时标报文
+- DataType 215: 带相对时间七字节时标的浮点值
+- DataType 216: 带相对时间七字节时标的整形值
+- DataType 217: 带相对时间七字节时标的字符值
 """
 import random
 from typing import List, Dict, Any, Union
@@ -37,6 +45,13 @@ class GenericDataGenerator:
     DATA_TYPE_INT = 4       # 有符号整数
     DATA_TYPE_FLOAT = 7     # R32.23浮点数 (遥测)
     DATA_TYPE_DPI = 9       # 双点信息
+    
+    # 南网扩展数据类型 (DataType 213-217)
+    DATA_TYPE_TIME_TAG_7 = 213        # 带绝对时间七字节时标报文
+    DATA_TYPE_TIME_TAG_REL_7 = 214    # 带相对时间七字节时标报文
+    DATA_TYPE_FLOAT_TIME_7 = 215      # 带相对时间七字节时标的浮点值
+    DATA_TYPE_INT_TIME_7 = 216        # 带相对时间七字节时标的整形值
+    DATA_TYPE_CHAR_TIME_7 = 217       # 带相对时间七字节时标的字符值
     
     def __init__(self):
         self.points: List[GenericPoint] = []

@@ -27,3 +27,4 @@ find_package(Qt5 COMPONENTS Core Network REQUIRED)
 # 添加子目录
 add_subdirectory(lib)
 add_subdirectory(app)
+add_subdirectory(msg_parser)

@@ -51,6 +51,66 @@ struct DigitalPoint {
     }
 };
 
+// 保护动作事件 (ASDU2 - 带相对时间的时标报文)
+// 用于保护动作事件上送，包含故障序号、故障相别等信息
+struct ProtectionEvent
+{
+    uint16_t asduAddr = 0;                                     // ASDU公共地址 (完整2字节)
+    uint8_t fun = 0;                                           // 功能类型
+    uint8_t inf = 0;                                           // 信息序号
+    DoublePointValue value = DoublePointValue::Indeterminate0; // 动作状态
+    uint16_t relativeTime = 0;                                 // 相对时间
+    uint16_t faultNo = 0;                                      // 故障序号
+    uint8_t faultPhase = 0;                                    // 故障相别 (FPT)
+    QDateTime eventTime;                                       // 事件发生时间
+    QDateTime recvTime;                                        // 子站接收时间
+
+    // ========== 地址解析方法 (南网规范) ==========
+
+    uint8_t deviceAddr() const { return (asduAddr >> 8) & 0xFF; }
+    uint8_t cpuNo() const { return asduAddr & 0x07; }
+
+    // ========== 故障相别解析 (FPT) ==========
+    // D7: 有效位 (1=有效, 0=无效)
+    // D4: 区内(1)/区外(0)故障
+    // D3: 接地(1)/非接地(0)故障
+    // D2: C相故障
+    // D1: B相故障
+    // D0: A相故障
+
+    bool isValid() const { return faultPhase & 0x80; }
+    bool isInternalFault() const { return faultPhase & 0x10; } // 区内故障
+    bool isGroundFault() const { return faultPhase & 0x08; }   // 接地故障
+    bool isPhaseA() const { return faultPhase & 0x01; }
+    bool isPhaseB() const { return faultPhase & 0x02; }
+    bool isPhaseC() const { return faultPhase & 0x04; }
+
+    QString faultPhaseString() const
+    {
+        if (!isValid())
+            return "无效";
+        QString phases;
+        if (isPhaseA())
+            phases += "A";
+        if (isPhaseB())
+            phases += "B";
+        if (isPhaseC())
+            phases += "C";
+        if (phases.isEmpty())
+            phases = "未知";
+        if (isGroundFault())
+            phases += "接地";
+        if (isInternalFault())
+            phases += "(区内)";
+        else
+            phases += "(区外)";
+        return phases;
+    }
+
+    bool isOn() const { return value == DoublePointValue::On; }
+    bool isOff() const { return value == DoublePointValue::Off; }
+};
+
 // 通用服务数据点 (遥测/遥脉统一)
 // 数据类型由GDD.DataType决定: 7=浮点数(遥测), 3=无符号整数(遥脉)
 struct GenericPoint {

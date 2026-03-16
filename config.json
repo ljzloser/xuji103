@@ -17,11 +17,12 @@
       {"group": 2, "name": "装置状态量"},
       {"group": 5, "name": "ASCII字符串测试"},
       {"group": 6, "name": "有符号整数测试"},
-      {"group": 7, "name": "双点信息测试"}
+      {"group": 7, "name": "双点信息测试"},
+      {"group": 100, "name": "南网扩展类型(213-217)"}
     ]
   },
   "logging": {
     "level": "info",
-    "file": ""
+    "file": "xuji103.log"
   }
 }

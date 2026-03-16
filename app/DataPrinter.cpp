@@ -13,6 +13,72 @@ DataPrinter::DataPrinter(QObject* parent)
 {
 }
 
+DataPrinter::~DataPrinter()
+{
+    if (m_logFile.isOpen()) {
+        m_logStream.flush();
+        m_logFile.close();
+    }
+}
+
+void DataPrinter::setLogFile(const QString& path)
+{
+    if (m_logFile.isOpen()) {
+        m_logFile.close();
+    }
+    
+    if (!path.isEmpty()) {
+        m_logFile.setFileName(path);
+        if (m_logFile.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
+            m_logStream.setDevice(&m_logFile);
+            qInfo() << "日志文件已打开:" << path;
+        } else {
+            qWarning() << "无法打开日志文件:" << path << m_logFile.errorString();
+        }
+    }
+}
+
+void DataPrinter::writeLog(const QString& line)
+{
+    // 输出到控制台
+    qInfo().noquote() << line;
+    
+    // 输出到文件
+    if (m_logFile.isOpen()) {
+        m_logStream << line << "\n";
+        m_logStream.flush();
+    }
+}
+
+void DataPrinter::onRawFrame(const QByteArray& data, bool direction)
+{
+    QString dir = direction ? "RX" : "TX";
+    QString hex = data.toHex(' ').toUpper();
+    
+    // 解析帧类型
+    QString frameType;
+    if (data.size() >= 6) {
+        uint8_t ctrl1 = static_cast<uint8_t>(data[3]);
+        if ((ctrl1 & 0x01) == 0) {
+            // I格式
+            frameType = "I";
+        } else if ((ctrl1 & 0x03) == 0x01) {
+            // S格式
+            frameType = "S";
+        } else {
+            // U格式
+            frameType = "U";
+        }
+    }
+    
+    writeLog(QString("[%1] [FRAME-%2] %3 bytes | %4 | %5")
+        .arg(ts())
+        .arg(dir)
+        .arg(data.size())
+        .arg(frameType)
+        .arg(hex));
+}
+
 void DataPrinter::onConnected()
 {
     qInfo().noquote() << QString("[%1] [EVENT] Connected").arg(ts());

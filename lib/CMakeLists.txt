@@ -1,4 +1,10 @@
 # libiec103 - 南网以太网103协议库
+cmake_minimum_required(VERSION 3.5)
+
+find_package(Qt5 COMPONENTS Core Network REQUIRED)
+set(CMAKE_AUTOUIC ON)
+set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTORCC ON)
 
 set(IEC103_SOURCES
     src/apci/FrameCodec.cpp
@@ -36,9 +42,9 @@ set(IEC103_HEADERS
     include/iec103/transport/TcpTransport.h
 )
 
-add_library(xuji_iec103 STATIC ${IEC103_SOURCES} ${IEC103_HEADERS})
+add_library(lib_xuji103 STATIC ${IEC103_SOURCES} ${IEC103_HEADERS})
 
-target_include_directories(xuji_iec103
+target_include_directories(lib_xuji103
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:include>
@@ -46,10 +52,10 @@ target_include_directories(xuji_iec103
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
 
-target_link_libraries(xuji_iec103
+target_link_libraries(lib_xuji103
     PUBLIC
         Qt5::Core
         Qt5::Network
 )
 
-target_compile_features(xuji_iec103 PUBLIC cxx_std_14)
+target_compile_features(lib_xuji103 PUBLIC cxx_std_14)

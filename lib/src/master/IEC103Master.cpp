@@ -23,7 +23,6 @@ IEC103Master::IEC103Master(QObject* parent)
     , m_cmdTimer(new QTimer(this))
     , m_testTimer(new QTimer(this))
     , m_ackTimer(new QTimer(this))
-    , m_giTimer(new QTimer(this))
     , m_kBlockTimer(new QTimer(this))
 {
     connect(m_transport, &TcpTransport::connected, this, &IEC103Master::onConnected);
@@ -42,9 +41,6 @@ IEC103Master::IEC103Master(QObject* parent)
     
     m_ackTimer->setSingleShot(true);
     connect(m_ackTimer, &QTimer::timeout, this, &IEC103Master::onAckTimeout);
-    
-    m_giTimer->setSingleShot(false);
-    connect(m_giTimer, &QTimer::timeout, this, &IEC103Master::onGITimeout);
     
     m_kBlockTimer->setSingleShot(true);
     connect(m_kBlockTimer, &QTimer::timeout, this, &IEC103Master::onKBlockTimeout);
@@ -126,8 +122,8 @@ void IEC103Master::connectToServer()
     
     // 启动T0连接超时定时器
     m_connectTimer->start(m_config.connectTimeout);
-    m_logger->debug(QString("[T0] Connect timeout timer started: %1ms").arg(m_config.connectTimeout));
-    
+    m_logger->info(QString("[T0] 连接超时定时器已启动: %1ms").arg(m_config.connectTimeout));
+
     m_transport->connectToServer();
 }
 void IEC103Master::disconnectFromServer()
@@ -137,11 +133,10 @@ void IEC103Master::disconnectFromServer()
     m_kBlockTimer->stop();  // 停止k值阻塞超时定时器
     stopTestTimer();
     stopAckTimer();
-    m_giTimer->stop();
     
     // 发送STOPDT命令后再断开连接
     if (m_startDtReceived && m_transport->isConnected()) {
-        m_logger->info("Sending STOPDT before disconnect");
+        m_logger->info("断开连接前发送 STOPDT");
         Frame stopDt = FrameCodec::createUFrame(UControl::StopDtAct);
         sendFrame(stopDt);
     }
@@ -172,20 +167,25 @@ void IEC103Master::setLogLevel(LogLevel level)
 }
 void IEC103Master::generalInterrogation(uint8_t deviceAddr)
 {
+    generalInterrogationWithCpu(deviceAddr, 0);
+}
+
+void IEC103Master::generalInterrogationWithCpu(uint8_t deviceAddr, uint8_t cpuNo)
+{
     if (!isConnected()) {
-        m_logger->warning("Cannot send GI, not connected");
+        m_logger->warning("无法发送总召唤命令，未连接");
         return;
     }
 
     // k值控制：未确认帧数超过k时暂停发送
     uint16_t unconfirmed = m_seqManager.unconfirmedCount();
     if (unconfirmed >= m_config.maxUnconfirmed) {
-        m_logger->warning(QString("[k-Control] Send blocked: unconfirmed=%1 >= k=%2")
+        m_logger->warning(QString("[k控制] 发送阻塞: 未确认=%1 >= k=%2")
                         .arg(unconfirmed).arg(m_config.maxUnconfirmed));
         // 启动k值阻塞超时定时器
         if (!m_kBlockTimer->isActive()) {
             m_kBlockTimer->start(m_config.timeout);
-            m_logger->warning(QString("[k-Control] Block timeout timer started: %1ms").arg(m_config.timeout));
+            m_logger->warning(QString("[k控制] 阻塞超时定时器已启动: %1ms").arg(m_config.timeout));
         }
         return;
     }
@@ -193,14 +193,14 @@ void IEC103Master::generalInterrogation(uint8_t deviceAddr)
     // k值阻塞解除，停止超时定时器
     if (m_kBlockTimer->isActive()) {
         m_kBlockTimer->stop();
-        m_logger->info("[k-Control] Block cleared, timer stopped");
+        m_logger->info("[k控制] 阻塞已解除，定时器已停止");
     }
     
-    m_logger->debug(QString("[k-Control] Before send: unconfirmed=%1, k=%2")
+    m_logger->debug(QString("[k控制] 发送前: 未确认=%1, k=%2")
                   .arg(unconfirmed).arg(m_config.maxUnconfirmed));
 
-    // 构造完整ASDU地址: 高字节=设备编号, 低字节=0
-    uint16_t asduAddr = static_cast<uint16_t>(deviceAddr) << 8;
+    // 构造完整ASDU地址: 高字节=设备编号, 低字节=CPU号(低3位)
+    uint16_t asduAddr = (static_cast<uint16_t>(deviceAddr) << 8) | (cpuNo & 0x07);
 
     Asdu asdu = Asdu7Builder::build(asduAddr, m_giState.scn);
     QByteArray asduData = asdu.encode();
@@ -218,10 +218,10 @@ void IEC103Master::generalInterrogation(uint8_t deviceAddr)
     
     // 启动T1命令超时定时器
     m_cmdTimer->start(m_config.timeout);
-    m_logger->debug(QString("[T1] Command timeout timer started: %1ms").arg(m_config.timeout));
+    m_logger->debug(QString("[T1] 命令超时定时器已启动: %1ms").arg(m_config.timeout));
     
-    m_logger->info(QString("[I-TX] GI cmd N(S)=%1 N(R)=%2, Dev=%3 SCN=%4, unconfirmed=%5")
-                 .arg(sendSeq).arg(recvSeq).arg(deviceAddr).arg(m_giState.scn)
+    m_logger->info(QString("[I-TX] 总召唤命令 N(S)=%1 N(R)=%2, 装置=%3 CPU=%4 SCN=%5, 未确认=%6")
+                 .arg(sendSeq).arg(recvSeq).arg(deviceAddr).arg(cpuNo).arg(m_giState.scn)
                  .arg(m_seqManager.unconfirmedCount()));
 
     if (m_handler) {
@@ -230,20 +230,25 @@ void IEC103Master::generalInterrogation(uint8_t deviceAddr)
 }
 void IEC103Master::readGenericGroup(uint8_t deviceAddr, uint8_t group)
 {
+    readGenericGroupWithCpu(deviceAddr, 0, group);
+}
+
+void IEC103Master::readGenericGroupWithCpu(uint8_t deviceAddr, uint8_t cpuNo, uint8_t group)
+{
     if (!isConnected()) {
-        m_logger->warning("Cannot read generic group, not connected");
+        m_logger->warning("无法读取通用组，未连接");
         return;
     }
 
     // k值控制：未确认帧数超过k时暂停发送
     uint16_t unconfirmed = m_seqManager.unconfirmedCount();
     if (unconfirmed >= m_config.maxUnconfirmed) {
-        m_logger->warning(QString("[k-Control] Send blocked: unconfirmed=%1 >= k=%2")
+        m_logger->warning(QString("[k控制] 发送阻塞: 未确认=%1 >= k=%2")
                         .arg(unconfirmed).arg(m_config.maxUnconfirmed));
         // 启动k值阻塞超时定时器
         if (!m_kBlockTimer->isActive()) {
             m_kBlockTimer->start(m_config.timeout);
-            m_logger->warning(QString("[k-Control] Block timeout timer started: %1ms").arg(m_config.timeout));
+            m_logger->warning(QString("[k控制] 阻塞超时定时器已启动: %1ms").arg(m_config.timeout));
         }
         return;
     }
@@ -251,14 +256,14 @@ void IEC103Master::readGenericGroup(uint8_t deviceAddr, uint8_t group)
     // k值阻塞解除，停止超时定时器
     if (m_kBlockTimer->isActive()) {
         m_kBlockTimer->stop();
-        m_logger->info("[k-Control] Block cleared, timer stopped");
+        m_logger->info("[k控制] 阻塞已解除，定时器已停止");
     }
     
-    m_logger->debug(QString("[k-Control] Before send: unconfirmed=%1, k=%2")
+    m_logger->debug(QString("[k控制] 发送前: 未确认=%1, k=%2")
                   .arg(unconfirmed).arg(m_config.maxUnconfirmed));
 
-    // 构造完整ASDU地址: 高字节=设备编号, 低字节=0
-    uint16_t asduAddr = static_cast<uint16_t>(deviceAddr) << 8;
+    // 构造完整ASDU地址: 高字节=设备编号, 低字节=CPU号(低3位)
+    uint16_t asduAddr = (static_cast<uint16_t>(deviceAddr) << 8) | (cpuNo & 0x07);
 
     Asdu asdu = Asdu21Builder::buildReadGroup(asduAddr, group, KOD::ActualValue);
     QByteArray asduData = asdu.encode();
@@ -276,27 +281,81 @@ void IEC103Master::readGenericGroup(uint8_t deviceAddr, uint8_t group)
     
     // 启动T1命令超时定时器
     m_cmdTimer->start(m_config.timeout);
-    m_logger->debug(QString("[T1] Command timeout timer started: %1ms").arg(m_config.timeout));
+    m_logger->debug(QString("[T1] 命令超时定时器已启动: %1ms").arg(m_config.timeout));
     
-    m_logger->info(QString("[I-TX] ReadGroup N(S)=%1 N(R)=%2, Dev=%3 Group=%4, unconfirmed=%5")
-                 .arg(sendSeq).arg(recvSeq).arg(deviceAddr).arg(group)
+    m_logger->info(QString("[I-TX] 读组命令 N(S)=%1 N(R)=%2, 装置=%3 CPU=%4 组=%5, 未确认=%6")
+                 .arg(sendSeq).arg(recvSeq).arg(deviceAddr).arg(cpuNo).arg(group)
                  .arg(m_seqManager.unconfirmedCount()));
 }
-void IEC103Master::startPeriodicGI(int intervalMs)
+
+bool IEC103Master::sendRawFrame(const QByteArray& data)
 {
-    m_giTimer->start(intervalMs);
+    if (!m_transport->isConnected()) {
+        m_logger->warning("无法发送原始帧，未连接");
+        return false;
+    }
+    
+    // 验证帧格式: 必须以68H开头，长度至少7字节 (68H + 长度2字节 + APCI 4字节)
+    if (data.size() < 7 || static_cast<uint8_t>(data[0]) != 0x68) {
+        m_logger->warning("无效的原始帧格式: 必须以0x68开头且至少7字节");
+        return false;
+    }
+    
+    // 验证长度域
+    uint16_t len = static_cast<uint8_t>(data[1]) | (static_cast<uint8_t>(data[2]) << 8);
+    if (len + 3 != data.size()) {  // 长度域 + 3字节头 = 总长度
+        m_logger->warning(QString("无效的原始帧长度: 期望 %1, 实际 %2")
+                        .arg(len + 3).arg(data.size()));
+        return false;
+    }
+    
+    send(data);
+    m_logger->debug(QString("[原始帧-TX] 已发送原始帧: %1 字节").arg(data.size()));
+    
+    // 回调通知
+    if (m_handler) {
+        m_handler->onRawFrame(data, false);  // false = 发送
+    }
+    
+    return true;
 }
-void IEC103Master::stopPeriodicGI()
+
+bool IEC103Master::sendRawAsdu(const QByteArray& asduData)
 {
-    m_giTimer->stop();
+    if (!m_transport->isConnected()) {
+        m_logger->warning("无法发送原始ASDU，未连接");
+        return false;
+    }
+    
+    // k值控制
+    uint16_t unconfirmed = m_seqManager.unconfirmedCount();
+    if (unconfirmed >= m_config.maxUnconfirmed) {
+        m_logger->warning(QString("[k控制] 发送阻塞: 未确认=%1 >= k=%2")
+                        .arg(unconfirmed).arg(m_config.maxUnconfirmed));
+        return false;
+    }
+    
+    uint16_t sendSeq = m_seqManager.nextSendSeq();
+    uint16_t recvSeq = m_seqManager.recvSeq();
+    Frame frame = FrameCodec::createIFrame(sendSeq, recvSeq, asduData);
+    
+    sendFrame(frame);
+    m_sendQueue.enqueue(sendSeq, frame);
+    
+    m_logger->info(QString("[I-TX] 原始ASDU N(S)=%1 N(R)=%2, %3 字节, 未确认=%4")
+                 .arg(sendSeq).arg(recvSeq).arg(asduData.size())
+                 .arg(m_seqManager.unconfirmedCount()));
+    
+    return true;
 }
+
 // ========== Slot handlers ==========
 
 void IEC103Master::onConnected()
 {
     // TCP连接成功，停止T0超时定时器
     m_connectTimer->stop();
-    m_logger->info("TCP connected, sending STARTDT");
+    m_logger->info("TCP连接成功，发送 STARTDT");
     setState(LinkState::Connected);
     
     Frame startDt = FrameCodec::createUFrame(UControl::StartDtAct);
@@ -304,7 +363,7 @@ void IEC103Master::onConnected()
 }
 void IEC103Master::onDisconnected()
 {
-    m_logger->info("Disconnected");
+    m_logger->info("连接已断开");
     setState(LinkState::Disconnected);
     m_startDtReceived = false;
     m_testFrPending = false;  // 重置 TESTFR 状态
@@ -323,16 +382,24 @@ void IEC103Master::onDisconnected()
 }
 void IEC103Master::onError(const QString& error)
 {
-    m_logger->error(QString("Transport error: %1").arg(error));
-    if (m_handler) {
+    m_logger->error(QString("传输错误: %1").arg(error));
+    emit errorOccurred(error);
+    setState(LinkState::Error);
+    if (m_handler)
+    {
         m_handler->onError(error);
     }
 }
 void IEC103Master::onDataReceived(const QByteArray& data)
 {
+    // 原始报文回调 (接收)
+    if (m_handler) {
+        m_handler->onRawFrame(data, true);  // true = 接收
+    }
+    
     Frame frame = FrameCodec::decode(data);
     if (!frame.isValid()) {
-        m_logger->warning("Received invalid frame");
+        m_logger->warning(QString("收到无效帧: %1").arg(QString(data.toHex(' '))));
         return;
     }
     
@@ -341,8 +408,8 @@ void IEC103Master::onDataReceived(const QByteArray& data)
 
 void IEC103Master::onConnectTimeout()
 {
-    QString reason = QString("Connection timeout (T0=%1ms)").arg(m_config.connectTimeout);
-    m_logger->error(QString("[T0] ") + reason + " - Disconnecting!");
+    QString reason = QString("连接超时 (T0=%1ms)").arg(m_config.connectTimeout);
+    m_logger->error(QString("[T0] ") + reason + " - 正在断开连接!");
     
     // 先通知应用层
     if (m_handler) {
@@ -355,8 +422,8 @@ void IEC103Master::onConnectTimeout()
 
 void IEC103Master::onCmdTimeout()
 {
-    QString reason = QString("Command timeout (T1=%1ms)").arg(m_config.timeout);
-    m_logger->error(QString("[T1] ") + reason + " - Disconnecting!");
+    QString reason = QString("命令超时 (T1=%1ms)").arg(m_config.timeout);
+    m_logger->error(QString("[T1] ") + reason + " - 正在断开连接!");
     
     // 先通知应用层
     if (m_handler) {
@@ -371,8 +438,8 @@ void IEC103Master::onTestTimeout()
 {
     // 检查上次 TESTFR 是否收到确认
     if (m_testFrPending) {
-        QString reason = QString("TESTFR timeout (T1=%1ms)").arg(m_config.timeout);
-        m_logger->error(QString("[TESTFR] ") + reason + " - Disconnecting!");
+        QString reason = QString("TESTFR 超时 (T1=%1ms)").arg(m_config.timeout);
+        m_logger->error(QString("[TESTFR] ") + reason + " - 正在断开连接!");
         
         // 先通知应用层
         if (m_handler) {
@@ -384,7 +451,7 @@ void IEC103Master::onTestTimeout()
         return;
     }
     
-    m_logger->debug("Sending TESTFR");
+    m_logger->debug("发送 TESTFR");
     Frame testFr = FrameCodec::createUFrame(UControl::TestFrAct);
     sendFrame(testFr);
     m_testFrPending = true;
@@ -394,18 +461,12 @@ void IEC103Master::onAckTimeout()
 {
     sendAck();
 }
-void IEC103Master::onGITimeout()
-{
-    if (isConnected()) {
-        generalInterrogation(0);
-    }
-}
 
 void IEC103Master::onKBlockTimeout()
 {
-    QString reason = QString("k-value block timeout (k=%1, timeout=%2ms)")
+    QString reason = QString("k值阻塞超时 (k=%1, 超时=%2ms)")
                      .arg(m_config.maxUnconfirmed).arg(m_config.timeout);
-    m_logger->error(QString("[k-Control] ") + reason + " - Disconnecting!");
+    m_logger->error(QString("[k控制] ") + reason + " - 正在断开连接!");
     
     // 先通知应用层
     if (m_handler) {
@@ -433,9 +494,14 @@ void IEC103Master::processReceivedFrame(const Frame& frame)
 }
 void IEC103Master::processIFrame(const Frame& frame)
 {
+    // I帧回调
+    if (m_handler) {
+        m_handler->onIFrame(frame.asdu(), frame.sendSeq(), frame.recvSeq());
+    }
+    
     uint16_t recvSeq = frame.sendSeq();
     if (!m_seqManager.validateRecvSeq(recvSeq)) {
-        m_logger->error(QString("[I-RX] SEQUENCE ERROR: N(S)=%1, expected=%2 - Disconnecting!")
+        m_logger->error(QString("[I-RX] 序号错误: N(S)=%1, 期望=%2 - 正在断开连接!")
                       .arg(recvSeq).arg(m_seqManager.recvSeq()));
         // 根据IEC 104协议，序号错误表示可能丢帧或重复，应断开重连
         disconnectFromServer();
@@ -446,7 +512,7 @@ void IEC103Master::processIFrame(const Frame& frame)
     // 收到I帧响应，停止T1命令超时定时器
     if (m_cmdTimer->isActive()) {
         m_cmdTimer->stop();
-        m_logger->debug("[T1] Command timeout timer stopped (response received)");
+        m_logger->debug("[T1] 命令超时定时器已停止 (收到响应)");
     }
 
     uint16_t ackSeq = frame.recvSeq();
@@ -456,12 +522,12 @@ void IEC103Master::processIFrame(const Frame& frame)
     // w值控制：收到w个I帧后立即发S帧确认
     m_seqManager.incrementRecvCount();
     uint8_t recvCount = m_seqManager.recvCount();
-    m_logger->info(QString("[w-Control] I-Frame #%1 received, w=%2, threshold=%3")
+    m_logger->info(QString("[w控制] 收到I帧 #%1, w=%2, 阈值=%3")
                   .arg(recvCount).arg(m_config.maxAckDelay)
-                  .arg(recvCount >= m_config.maxAckDelay ? "REACHED" : "not reached"));
+                  .arg(recvCount >= m_config.maxAckDelay ? "已达到" : "未达到"));
 
     if (recvCount >= m_config.maxAckDelay) {
-        m_logger->info(QString("[w-Control] >>> SENDING S-FRIME NOW (w=%1 reached) <<<")
+        m_logger->info(QString("[w控制] >>> 立即发送S帧 (w=%1 已达到) <<<")
                      .arg(m_config.maxAckDelay));
         sendAck();
         m_seqManager.resetRecvCount();
@@ -473,28 +539,33 @@ void IEC103Master::processIFrame(const Frame& frame)
     // 打印确认信息
     if (ackSeq > prevAck || (ackSeq == 0 && prevAck > 30000)) {
         uint16_t confirmedCount = (ackSeq - prevAck) & 0x7FFF;
-        m_logger->debug(QString("[I-RX] Peer confirmed: N(R)=%1, confirmed %2 frames, unconfirmed=%3")
+        m_logger->debug(QString("[I-RX] 对端确认: N(R)=%1, 确认了 %2 帧, 未确认=%3")
                       .arg(ackSeq).arg(confirmedCount).arg(m_seqManager.unconfirmedCount()));
     }
 
     Asdu asdu;
     if (asdu.parse(frame.asdu())) {
-        m_logger->debug(QString("[I-RX] ASDU TI=%1 COT=%2 Addr=%3")
+        m_logger->debug(QString("[I-RX] ASDU TI=%1 COT=%2 地址=%3")
                       .arg(asdu.ti()).arg(asdu.cot()).arg(asdu.addr()));
         processAsdu(asdu);
     } else {
-        m_logger->warning("Failed to parse ASDU");
+        m_logger->warning("ASDU 解析失败");
     }
 }
 void IEC103Master::processSFrame(const Frame& frame)
 {
+    // S帧回调
+    if (m_handler) {
+        m_handler->onSFrame(frame.recvSeq());
+    }
+    
     uint16_t ackSeq = frame.recvSeq();
     uint16_t sendSeq = m_seqManager.sendSeq();
     
     // 验证：N(R) 不能大于已发送序号
     // 注意：sendSeq 是下一个要发送的序号，所以 N(R) 应该 <= sendSeq
     if (ackSeq > sendSeq) {
-        m_logger->error(QString("[S-RX] SEQUENCE ERROR: N(R)=%1 > sendSeq=%2 - Disconnecting!")
+        m_logger->error(QString("[S-RX] 序号错误: N(R)=%1 > sendSeq=%2 - 正在断开连接!")
                       .arg(ackSeq).arg(sendSeq));
         disconnectFromServer();
         return;
@@ -512,13 +583,18 @@ void IEC103Master::processSFrame(const Frame& frame)
     } else {
         confirmedCount = (ackSeq + 32768) - prevAck;  // 序号回绕
     }
-    m_logger->info(QString("[S-RX] Ack received: N(R)=%1, confirmed %2 frames, unconfirmed=%3")
+    m_logger->info(QString("[S-RX] 收到确认: N(R)=%1, 确认了 %2 帧, 未确认=%3")
                  .arg(ackSeq).arg(confirmedCount).arg(m_seqManager.unconfirmedCount()));
 }
 void IEC103Master::processUFrame(const Frame& frame)
 {
+    // U帧回调
+    if (m_handler) {
+        m_handler->onUFrame(static_cast<uint8_t>(frame.uControl()));
+    }
+    
     if (frame.isStartDtCon()) {
-        m_logger->info("Received STARTDT confirmation");
+        m_logger->info("收到 STARTDT 确认");
         m_startDtReceived = true;
         setState(LinkState::Started);
         startTestTimer();
@@ -530,15 +606,15 @@ void IEC103Master::processUFrame(const Frame& frame)
             m_handler->onConnected();
         }
     } else if (frame.isStopDtCon()) {
-        m_logger->info("Received STOPDT confirmation");
+        m_logger->info("收到 STOPDT 确认");
         m_startDtReceived = false;
         setState(LinkState::Stopped);
     } else if (frame.isTestFrAct()) {
-        m_logger->debug("Received TESTFR act, sending con");
+        m_logger->debug("收到 TESTFR 请求，发送确认");
         Frame testFrCon = FrameCodec::createUFrame(UControl::TestFrCon);
         sendFrame(testFrCon);
     } else if (frame.isTestFrCon()) {
-        m_logger->debug("Received TESTFR con");
+        m_logger->debug("收到 TESTFR 确认");
         m_testFrPending = false;  // 清除等待确认标志
         startTestTimer();         // 重新开始 T3 计时
     }
@@ -546,7 +622,7 @@ void IEC103Master::processUFrame(const Frame& frame)
 void IEC103Master::processAsdu(const Asdu& asdu)
 {
     uint8_t ti = asdu.ti();
-    m_logger->debug(QString("Processing ASDU TI=%1").arg(ti));
+    m_logger->debug(QString("处理 ASDU TI=%1").arg(ti));
     
     switch (ti) {
     case 1:
@@ -568,7 +644,7 @@ void IEC103Master::processAsdu(const Asdu& asdu)
         processAsdu42(asdu);
         break;
     default:
-        m_logger->warning(QString("Unhandled ASDU TI=%1").arg(ti));
+        m_logger->warning(QString("未处理的 ASDU TI=%1").arg(ti));
     }
 }
 void IEC103Master::processAsdu1(const Asdu& asdu)
@@ -578,7 +654,7 @@ void IEC103Master::processAsdu1(const Asdu& asdu)
         uint16_t asduAddr = asdu.addr();
         for (const auto& result : parser.results()) {
             DigitalPoint point = parser.toDigitalPoint(result, asduAddr);
-            m_logger->info(QString("Digital (ASDU1): Dev=%1 FUN=%2 INF=%3 DPI=%4")
+            m_logger->info(QString("遥信(ASDU1): 装置=%1 FUN=%2 INF=%3 DPI=%4")
                         .arg(point.deviceAddr()).arg(point.fun).arg(point.inf)
                         .arg(static_cast<int>(point.value)));
             
@@ -595,9 +671,24 @@ void IEC103Master::processAsdu2(const Asdu& asdu)
         uint16_t asduAddr = asdu.addr();
         uint8_t devAddr = (asduAddr >> 8) & 0xFF;
         for (const auto& result : parser.results()) {
-            m_logger->info(QString("Event (ASDU2): Dev=%1 FUN=%2 INF=%3 DPI=%4 FaultNo=%5")
+            m_logger->info(QString("保护事件(ASDU2): 装置=%1 FUN=%2 INF=%3 DPI=%4 故障号=%5")
                         .arg(devAddr).arg(result.fun).arg(result.inf)
                         .arg(static_cast<int>(result.dpi)).arg(result.faultNo));
+
+            // 调用保护动作事件回调
+            if (m_handler) {
+                ProtectionEvent event;
+                event.asduAddr = asduAddr;
+                event.fun = result.fun;
+                event.inf = result.inf;
+                event.value = result.dpi;
+                event.relativeTime = result.relativeTime;
+                event.faultNo = result.faultNo;
+                event.faultPhase = result.fpt;
+                event.eventTime = result.eventTime.toDateTime();
+                event.recvTime = result.recvTime.toDateTime();
+                m_handler->onProtectionEvent(event);
+            }
         }
     }
 }
@@ -605,7 +696,7 @@ void IEC103Master::processAsdu8(const Asdu& asdu)
 {
     Asdu8Parser parser;
     if (parser.parse(asdu)) {
-        m_logger->info(QString("GI terminated for device %1, SCN=%2")
+        m_logger->info(QString("总召唤结束 装置=%1 SCN=%2")
                     .arg(parser.result().deviceAddr()).arg(parser.result().scn));
         
         // 检查GI状态：地址0(子站本身)匹配任何响应地址，或者地址精确匹配
@@ -644,7 +735,7 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
             case static_cast<uint8_t>(DataType::OS8ASCII):
                 // ASCII字符串
                 point.value = item.toAsciiString();
-                m_logger->info(QString("Generic(string): Dev=%1 Group=%2 Entry=%3 Value=\"%4\" DataType=1")
+                m_logger->info(QString("通用数据(字符串): 装置=%1 组=%2 条目=%3 值=\"%4\" DataType=1")
                             .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(point.value.toString()));
                 break;
@@ -652,7 +743,7 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
             case static_cast<uint8_t>(DataType::UI):
                 // 无符号整数 (遥脉/状态量)
                 point.value = item.toUInt32();
-                m_logger->info(QString("Generic(uint): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=3")
+                m_logger->info(QString("通用数据(无符号): 装置=%1 组=%2 条目=%3 值=%4 DataType=3")
                             .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(point.toUInt32()));
                 break;
@@ -661,7 +752,7 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
             case static_cast<uint8_t>(DataType::UF):
                 // 有符号整数
                 point.value = item.toInt32();
-                m_logger->info(QString("Generic(int): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=%5")
+                m_logger->info(QString("通用数据(有符号): 装置=%1 组=%2 条目=%3 值=%4 DataType=%5")
                             .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(point.toInt32()).arg(item.gdd.dataType));
                 break;
@@ -670,7 +761,7 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
             case static_cast<uint8_t>(DataType::F):
                 // 浮点数 (遥测)
                 point.value = item.toFloat();
-                m_logger->info(QString("Generic(float): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=%5")
+                m_logger->info(QString("通用数据(浮点): 装置=%1 组=%2 条目=%3 值=%4 DataType=%5")
                             .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(point.toFloat(), 0, 'f', 2).arg(item.gdd.dataType));
                 break;
@@ -678,7 +769,7 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
             case static_cast<uint8_t>(DataType::DPI):
                 // 双点信息
                 point.value = static_cast<int>(item.toDPI());
-                m_logger->info(QString("Generic(dpi): Dev=%1 Group=%2 Entry=%3 Value=%4 DataType=9")
+                m_logger->info(QString("通用数据(双点): 装置=%1 组=%2 条目=%3 值=%4 DataType=9")
                             .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(static_cast<int>(item.toDPI())));
                 break;
@@ -688,7 +779,7 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
                 // DataType 213: 带绝对时间七字节时标报文
                 point.value = item.absoluteTime();
                 point.timestamp = item.absoluteTime();
-                m_logger->info(QString("Generic(time213): Dev=%1 Group=%2 Entry=%3 Time=%4 DataType=213")
+                m_logger->info(QString("通用数据(时标213): 装置=%1 组=%2 条目=%3 时间=%4 DataType=213")
                             .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")));
                 break;
@@ -697,7 +788,7 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
                 // DataType 214: 带相对时间七字节时标报文
                 point.value = item.relativeTime();
                 point.timestamp = item.relativeTime();
-                m_logger->info(QString("Generic(time214): Dev=%1 Group=%2 Entry=%3 Time=%4 DataType=214")
+                m_logger->info(QString("通用数据(时标214): 装置=%1 组=%2 条目=%3 时间=%4 DataType=214")
                             .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")));
                 break;
@@ -706,7 +797,7 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
                 // DataType 215: 带相对时间七字节时标的浮点值
                 point.value = item.floatWithTime();
                 point.timestamp = item.relativeTime();
-                m_logger->info(QString("Generic(float215): Dev=%1 Group=%2 Entry=%3 Value=%4 Time=%5 DataType=215")
+                m_logger->info(QString("通用数据(浮点215): 装置=%1 组=%2 条目=%3 值=%4 时间=%5 DataType=215")
                             .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(point.toFloat(), 0, 'f', 2)
                             .arg(point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")));
@@ -716,7 +807,7 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
                 // DataType 216: 带相对时间七字节时标的整形值
                 point.value = item.intWithTime();
                 point.timestamp = item.relativeTime();
-                m_logger->info(QString("Generic(int216): Dev=%1 Group=%2 Entry=%3 Value=%4 Time=%5 DataType=216")
+                m_logger->info(QString("通用数据(整型216): 装置=%1 组=%2 条目=%3 值=%4 时间=%5 DataType=216")
                             .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(point.toInt32())
                             .arg(point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")));
@@ -726,7 +817,7 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
                 // DataType 217: 带相对时间七字节时标的字符值
                 point.value = item.stringWithTime();
                 point.timestamp = item.relativeTime();
-                m_logger->info(QString("Generic(char217): Dev=%1 Group=%2 Entry=%3 Value=\"%4\" Time=%5 DataType=217")
+                m_logger->info(QString("通用数据(字符217): 装置=%1 组=%2 条目=%3 值=\"%4\" 时间=%5 DataType=217")
                             .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                             .arg(point.value.toString())
                             .arg(point.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")));
@@ -737,13 +828,13 @@ void IEC103Master::processAsdu10(const Asdu& asdu)
                 if (item.gdd.dataSize == 4 && item.gid.size() >= 4) {
                     // 尝试作为浮点数或整数
                     point.value = item.toFloat();
-                    m_logger->info(QString("Generic(raw4): Dev=%1 Group=%2 Entry=%3 DataType=%4 Size=%5")
+                    m_logger->info(QString("通用数据(原始4字节): 装置=%1 组=%2 条目=%3 DataType=%4 大小=%5")
                                 .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                                 .arg(item.gdd.dataType).arg(item.gdd.dataSize));
                 } else {
                     // 记录原始数据
-                    point.value = QString("[raw:%1 bytes]").arg(item.gid.size());
-                    m_logger->info(QString("Generic(unknown): Dev=%1 Group=%2 Entry=%3 DataType=%4 Size=%5")
+                    point.value = QString("[原始数据:%1字节]").arg(item.gid.size());
+                    m_logger->info(QString("通用数据(未知): 装置=%1 组=%2 条目=%3 DataType=%4 大小=%5")
                                 .arg(devAddr).arg(item.gin.group).arg(item.gin.entry)
                                 .arg(item.gdd.dataType).arg(item.gdd.dataSize));
                 }
@@ -767,11 +858,11 @@ void IEC103Master::processAsdu11(const Asdu& asdu)
         uint8_t devAddr = (asduAddr >> 8) & 0xFF;
         const Asdu11Data& data = parser.data();
         
-        m_logger->info(QString("Catalog (ASDU11): Dev=%1 Group=%2 Entry=%3 NGD=%4")
+        m_logger->info(QString("目录(ASDU11): 装置=%1 组=%2 条目=%3 NGD=%4")
                     .arg(devAddr).arg(data.gin.group).arg(data.gin.entry).arg(data.ngd));
         
         for (const auto& entry : data.entries) {
-            m_logger->debug(QString("  KOD=%1(%2) DataType=%3 Size=%4 Number=%5")
+            m_logger->debug(QString("  KOD=%1(%2) DataType=%3 大小=%4 数量=%5")
                          .arg(entry.kod, 2, 16, QChar('0'))
                          .arg(entry.kodDescription())
                          .arg(entry.gdd.dataType)
@@ -788,7 +879,7 @@ void IEC103Master::processAsdu42(const Asdu& asdu)
         auto points = parser.toDigitalPoints(asduAddr);
         
         for (const auto& point : points) {
-            m_logger->info(QString("Digital (ASDU42): Dev=%1 FUN=%2 INF=%3 DPI=%4")
+            m_logger->info(QString("遥信(ASDU42): 装置=%1 FUN=%2 INF=%3 DPI=%4")
                         .arg(point.deviceAddr()).arg(point.fun).arg(point.inf)
                         .arg(static_cast<int>(point.value)));
             
@@ -812,12 +903,18 @@ void IEC103Master::setState(LinkState state)
 void IEC103Master::sendFrame(const Frame& frame)
 {
     QByteArray data = frame.encode();
+    
+    // 发送回调
+    if (m_handler) {
+        m_handler->onRawFrame(data, false);  // false = 发送
+    }
+    
     send(data);
 }
 void IEC103Master::send(const QByteArray& data)
 {
     if (!m_transport->send(data)) {
-        m_logger->error("Failed to send frame");
+        m_logger->error("发送帧失败");
     }
 }
 void IEC103Master::sendAck()
@@ -826,7 +923,7 @@ void IEC103Master::sendAck()
     Frame sFrame = FrameCodec::createSFrame(recvSeq);
     sendFrame(sFrame);
     m_seqManager.resetRecvCount();  // 发送确认后重置接收计数
-    m_logger->info(QString("[S-TX] Sent S-Frame N(R)=%1 (acknowledged peer's I-frames)")
+    m_logger->info(QString("[S-TX] 发送S帧 N(R)=%1 (确认对端I帧)")
                  .arg(recvSeq));
 }
 void IEC103Master::startTestTimer()

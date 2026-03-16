@@ -40,6 +40,12 @@ public:
             return false;
         }
         
+        // 设置日志文件
+        QString logFile = Config::instance().logFile();
+        if (!logFile.isEmpty()) {
+            m_printer->setLogFile(logFile);
+        }
+        
         IEC103Master::Config config;
         config.host = Config::instance().host();
         config.port = Config::instance().port();
@@ -71,7 +77,7 @@ private slots:
         // 启动周期性总召唤
         int giInterval = Config::instance().giInterval();
         if (giInterval > 0) {
-            m_master->startPeriodicGI(giInterval * 1000);
+            // m_master->startPeriodicGI(giInterval * 1000);
         }
         
         // 立即执行一次总召唤

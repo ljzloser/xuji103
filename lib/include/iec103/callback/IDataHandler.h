@@ -4,6 +4,7 @@
 #include "../types/DataPoint.h"
 #include "../types/Types.h"
 #include <QtGlobal>
+#include <QByteArray>
 
 namespace IEC103 {
 
@@ -13,12 +14,55 @@ class IDataHandler {
 public:
     virtual ~IDataHandler() = default;
 
+    // ========== 原始报文回调 ==========
+
+    // 接收到原始报文 (APDU完整帧，包含68H开头)
+    // data: 完整APDU帧数据
+    // direction: true=接收, false=发送
+    virtual void onRawFrame(const QByteArray &data, bool direction)
+    {
+        (void)data;
+        (void)direction;
+    }
+
+    // 接收到I格式帧 (解析后的ASDU)
+    // asduData: ASDU原始数据 (不含APCI)
+    // sendSeq: 发送序号 N(S)
+    // recvSeq: 接收序号 N(R)
+    virtual void onIFrame(const QByteArray &asduData, uint16_t sendSeq, uint16_t recvSeq)
+    {
+        (void)asduData;
+        (void)sendSeq;
+        (void)recvSeq;
+    }
+
+    // 接收到S格式帧
+    // recvSeq: 接收序号 N(R)
+    virtual void onSFrame(uint16_t recvSeq)
+    {
+        (void)recvSeq;
+    }
+
+    // 接收到U格式帧
+    // uType: U格式类型 (0x07=STARTDT_ACT, 0x0B=STARTDT_CON, etc.)
+    virtual void onUFrame(uint8_t uType)
+    {
+        (void)uType;
+    }
+
     // ========== 遥信回调 ==========
 
     // 双点遥信 (总召唤响应ASDU42或突发ASDU1)
     // 南网规范统一使用双点遥信，单点由子站转换为双点
     virtual void onDoublePoint(const DigitalPoint& point) {
         (void)point; // 默认忽略
+    }
+
+    // 保护动作事件 (ASDU2 - 带相对时间的时标报文)
+    // 包含故障序号、故障相别、相对时间等信息
+    virtual void onProtectionEvent(const ProtectionEvent &event)
+    {
+        (void)event; // 默认忽略
     }
 
     // ========== 通用服务回调 (遥测/遥脉统一) ==========

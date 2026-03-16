@@ -2,12 +2,16 @@
 """
 南网以太网103协议子站模拟器
 用于测试主站程序
+
+支持多装置、多CPU
 """
 import asyncio
 import argparse
 import logging
 import struct
-from typing import Optional
+import random
+from typing import Optional, Dict, List
+from dataclasses import dataclass, field
 
 import sys
 import os
@@ -20,6 +24,7 @@ from protocol.asdu import (
     GenericDataItem
 )
 from data import DigitalDataGenerator, GenericDataGenerator
+from data.generic import GenericPoint
 
 
 logging.basicConfig(
@@ -30,43 +35,179 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class IEC103Slave:
-    """IEC103子站模拟器"""
+@dataclass
+class DeviceConfig:
+    """装置配置"""
+    device_addr: int           # 装置地址 (1-254)
+    name: str                  # 装置名称
+    cpus: List[int] = field(default_factory=lambda: [0])  # CPU列表
+    digital_gen: DigitalDataGenerator = None
+    generic_gens: Dict[int, GenericDataGenerator] = field(default_factory=dict)  # CPU -> Generator
+    
+    def __post_init__(self):
+        if self.digital_gen is None:
+            self.digital_gen = DigitalDataGenerator()
+        for cpu in self.cpus:
+            if cpu not in self.generic_gens:
+                self.generic_gens[cpu] = GenericDataGenerator()
 
-    def __init__(self, device_addr: int = 1, test_mode: str = 'normal'):
-        self.device_addr = device_addr
+
+class MultiDeviceSlave:
+    """多装置IEC103子站模拟器"""
+
+    def __init__(self, test_mode: str = 'normal'):
         self.send_seq = 0
         self.recv_seq = 0
-        self.last_ack_seq = 0  # 最后确认的序号（主站确认）
+        self.last_ack_seq = 0
         self.connected = False
         self.started = False
         self.frame_parser = FrameParser()
 
-        # 数据生成器
-        self.digital_gen = DigitalDataGenerator()
-        self.generic_gen = GenericDataGenerator()  # 遥测/遥脉统一
+        # 多装置配置
+        self.devices: Dict[int, DeviceConfig] = {}
+        self._init_devices()
 
         # 当前总召唤序号
         self.current_scn = 0
 
         # k/w 流量控制参数
-        self.max_unconfirmed = 12  # k值: 最大未确认I帧数
-        self.max_ack_delay = 8     # w值: 收到w个I帧后立即确认
-        self.recv_count = 0        # 接收未确认计数
+        self.max_unconfirmed = 12
+        self.max_ack_delay = 8
+        self.recv_count = 0
 
-        # 发送队列（用于k值控制）
+        # 发送队列
         self.send_queue = []
-        self.unconfirmed_count = 0  # 未确认的I帧数
+        self.unconfirmed_count = 0
         
-        # ========== 测试模式 ==========
-        # normal: 正常模式
-        # no_ack: 不发送S帧确认（测试k值阻塞超时）
-        # oversized_frame: 发送超长帧（测试帧长度校验）
-        # no_response: 不响应命令（测试T1超时）
-        # flood: 快速发送大量帧（测试接收缓冲区限制）
-        # ext_types: 发送南网扩展数据类型(213-217)
+        # 测试模式
         self.test_mode = test_mode
-        self.test_frame_sent = 0  # 测试帧计数
+        self.test_frame_sent = 0
+
+    def _init_devices(self):
+        """初始化多装置配置"""
+        # 装置1: 线路保护装置 (CPU 0, 1, 2)
+        dev1 = DeviceConfig(
+            device_addr=1,
+            name="线路保护1号",
+            cpus=[0, 1, 2]
+        )
+        # 为不同CPU设置不同的数据
+        self._setup_device_data(dev1)
+        self.devices[1] = dev1
+
+        # 装置2: 变压器保护装置 (CPU 0, 1)
+        dev2 = DeviceConfig(
+            device_addr=2,
+            name="变压器保护1号",
+            cpus=[0, 1]
+        )
+        self._setup_device_data(dev2)
+        self.devices[2] = dev2
+
+        # 装置3: 母线保护装置 (CPU 0)
+        dev3 = DeviceConfig(
+            device_addr=3,
+            name="母线保护1号",
+            cpus=[0]
+        )
+        self._setup_device_data(dev3)
+        self.devices[3] = dev3
+
+        logger.info(f"已初始化 {len(self.devices)} 个装置:")
+        for addr, dev in self.devices.items():
+            logger.info(f"  装置{addr} ({dev.name}): CPU {dev.cpus}")
+
+    def _setup_device_data(self, device: DeviceConfig):
+        """为装置设置数据"""
+        # 设置遥信数据
+        device.digital_gen = DigitalDataGenerator()
+        
+        # 为每个CPU设置通用服务数据
+        for cpu in device.cpus:
+            gen = GenericDataGenerator()
+            # 根据CPU号调整数据
+            self._customize_generic_data(gen, device.device_addr, cpu)
+            device.generic_gens[cpu] = gen
+
+    def _customize_generic_data(self, gen: GenericDataGenerator, device_addr: int, cpu: int):
+        """定制通用服务数据"""
+        # 清除默认数据
+        gen.points.clear()
+        
+        # 根据装置和CPU设置不同的数据组
+        base_value = device_addr * 100 + cpu * 10
+        
+        # 组1: 模拟量 (浮点数)
+        analog_points = [
+            GenericPoint(1, 1, f"装置{device_addr}-CPU{cpu}-电流A相", base_value + 100.0, "A", 7, 0, 1000, 2.0),
+            GenericPoint(1, 2, f"装置{device_addr}-CPU{cpu}-电流B相", base_value + 100.5, "A", 7, 0, 1000, 2.0),
+            GenericPoint(1, 3, f"装置{device_addr}-CPU{cpu}-电流C相", base_value + 101.0, "A", 7, 0, 1000, 2.0),
+            GenericPoint(1, 4, f"装置{device_addr}-CPU{cpu}-电压A相", 220.0 + cpu, "V", 7, 0, 500, 1.0),
+            GenericPoint(1, 5, f"装置{device_addr}-CPU{cpu}-电压B相", 220.0 + cpu, "V", 7, 0, 500, 1.0),
+            GenericPoint(1, 6, f"装置{device_addr}-CPU{cpu}-电压C相", 220.0 + cpu, "V", 7, 0, 500, 1.0),
+            GenericPoint(1, 7, f"装置{device_addr}-CPU{cpu}-有功功率", 50.0 + cpu * 10, "MW", 7, 0, 100, 0.5),
+            GenericPoint(1, 8, f"装置{device_addr}-CPU{cpu}-无功功率", 20.0 + cpu * 5, "MVar", 7, 0, 50, 0.2),
+            GenericPoint(1, 9, f"装置{device_addr}-CPU{cpu}-频率", 50.0, "Hz", 7, 49.5, 50.5, 0.01),
+        ]
+        gen.points.extend(analog_points)
+        
+        # 组2: 电能量 (无符号整数)
+        energy_points = [
+            GenericPoint(2, 1, f"装置{device_addr}-CPU{cpu}-正向有功电能", base_value * 100, "kWh", 3, increment=10),
+            GenericPoint(2, 2, f"装置{device_addr}-CPU{cpu}-反向有功电能", base_value * 10, "kWh", 3, increment=1),
+            GenericPoint(2, 3, f"装置{device_addr}-CPU{cpu}-正向无功电能", base_value * 50, "kVarh", 3, increment=5),
+            GenericPoint(2, 4, f"装置{device_addr}-CPU{cpu}-运行时间", base_value * 1000, "h", 3, increment=1),
+        ]
+        gen.points.extend(energy_points)
+        
+        # 组3: 定值 (浮点数)
+        setting_points = [
+            GenericPoint(3, 1, f"装置{device_addr}-CPU{cpu}-过流I段定值", 5.0 + cpu, "A", 7, 0, 100, 0.1),
+            GenericPoint(3, 2, f"装置{device_addr}-CPU{cpu}-过流II段定值", 3.0 + cpu, "A", 7, 0, 100, 0.1),
+            GenericPoint(3, 3, f"装置{device_addr}-CPU{cpu}-过流III段定值", 1.5 + cpu, "A", 7, 0, 100, 0.1),
+        ]
+        gen.points.extend(setting_points)
+        
+        # 组4: 软压板 (整数)
+        board_points = [
+            GenericPoint(4, 1, f"装置{device_addr}-CPU{cpu}-过流I段压板", 1, "", 3),
+            GenericPoint(4, 2, f"装置{device_addr}-CPU{cpu}-过流II段压板", 1, "", 3),
+            GenericPoint(4, 3, f"装置{device_addr}-CPU{cpu}-过流III段压板", 0, "", 3),
+        ]
+        gen.points.extend(board_points)
+        
+        # 组5: ASCII字符串
+        ascii_points = [
+            GenericPoint(5, 1, "装置型号", f"DEV-{device_addr:03d}", "", 1),
+            GenericPoint(5, 2, "软件版本", f"V2.{cpu}.0", "", 1),
+            GenericPoint(5, 3, "CPU名称", f"CPU-{cpu}", "", 1),
+        ]
+        gen.points.extend(ascii_points)
+        
+        # 组6: 有符号整数
+        int_points = [
+            GenericPoint(6, 1, f"装置{device_addr}-CPU{cpu}-有功功率(整数)", base_value * 10, "kW", 4, -10000, 10000, 100),
+            GenericPoint(6, 2, f"装置{device_addr}-CPU{cpu}-无功功率(整数)", -base_value * 2, "kVar", 4, -5000, 5000, 50),
+        ]
+        gen.points.extend(int_points)
+        
+        # 组7: 双点信息 (DPI)
+        dpi_points = [
+            GenericPoint(7, 1, f"装置{device_addr}-CPU{cpu}-开关1状态", 2, "", 9),
+            GenericPoint(7, 2, f"装置{device_addr}-CPU{cpu}-开关2状态", 1, "", 9),
+            GenericPoint(7, 3, f"装置{device_addr}-CPU{cpu}-隔离开关", 2, "", 9),
+        ]
+        gen.points.extend(dpi_points)
+        
+        # 组100: 南网扩展数据类型测试 (DataType 213-217)
+        ext_points = [
+            GenericPoint(100, 1, f"装置{device_addr}-CPU{cpu}-时标报文213", 0, "", 213),
+            GenericPoint(100, 2, f"装置{device_addr}-CPU{cpu}-时标报文214", 0, "", 214),
+            GenericPoint(100, 3, f"装置{device_addr}-CPU{cpu}-带时标浮点215", base_value + 123.45, "", 215),
+            GenericPoint(100, 4, f"装置{device_addr}-CPU{cpu}-带时标整数216", base_value * 100, "", 216),
+            GenericPoint(100, 5, f"装置{device_addr}-CPU{cpu}-带时标字符217", f"FAULT_{device_addr}_{cpu}", "", 217),
+        ]
+        gen.points.extend(ext_points)
 
     def reset(self):
         """重置状态"""
@@ -82,8 +223,25 @@ class IEC103Slave:
         """获取未确认的I帧数"""
         diff = self.send_seq - self.last_ack_seq
         if diff < 0:
-            diff += 32768  # 序号回绕
+            diff += 32768
         return diff
+    
+    def get_device(self, device_addr: int) -> Optional[DeviceConfig]:
+        """获取装置配置"""
+        return self.devices.get(device_addr)
+    
+    def parse_asdu_addr(self, asdu_addr: int) -> tuple:
+        """
+        解析南网规范ASDU地址
+        返回: (device_addr, cpu_no)
+        """
+        device_addr = (asdu_addr >> 8) & 0xFF
+        cpu_no = asdu_addr & 0x07
+        return device_addr, cpu_no
+    
+    def build_asdu_addr(self, device_addr: int, cpu_no: int = 0) -> int:
+        """构建南网规范ASDU地址"""
+        return (device_addr << 8) | (cpu_no & 0x07)
 
     async def handle_client(self, reader: asyncio.StreamReader, 
                            writer: asyncio.StreamWriter):
@@ -120,32 +278,32 @@ class IEC103Slave:
 
     async def spontaneous_loop(self, writer: asyncio.StreamWriter):
         """定时发送突发事件的循环"""
-        import struct
         event_count = 0
         try:
             while self.connected:
-                await asyncio.sleep(10)  # 每10秒发送一次
+                await asyncio.sleep(10)
                 if self.started and self.connected:
-                    # k值控制：未确认帧数超过k时暂停发送
                     unconfirmed = self.unconfirmed_frames()
                     if unconfirmed >= self.max_unconfirmed:
-                        logger.warning(f"[k-Control] Spontaneous blocked: unconfirmed={unconfirmed} >= k={self.max_unconfirmed}")
+                        logger.warning(f"[k控制] 突发发送阻塞: 未确认={unconfirmed} >= k={self.max_unconfirmed}")
                         continue
                     
                     event_count += 1
+                    # 随机选择一个装置和CPU发送事件
+                    device_addr = random.choice(list(self.devices.keys()))
+                    device = self.devices[device_addr]
+                    cpu = random.choice(device.cpus)
+                    
                     if event_count % 2 == 0:
-                        # 发送ASDU1突发遥信
-                        await self.send_spontaneous_event(writer)
+                        await self.send_spontaneous_event(writer, device_addr, cpu)
                     else:
-                        # 发送ASDU2保护动作事件
-                        await self.send_protection_event(writer)
+                        await self.send_protection_event(writer, device_addr, cpu)
         except asyncio.CancelledError:
             pass
 
     async def process_data(self, data: bytes, writer: asyncio.StreamWriter):
         """处理接收数据"""
         self.frame_parser.feed(data)
-
         frames = self.frame_parser.get_all_frames()
         for frame in frames:
             await self.handle_frame(frame, writer)
@@ -155,283 +313,253 @@ class IEC103Slave:
         if frame.is_u_format:
             await self.handle_u_format(frame, writer)
         elif frame.is_i_format:
-            # 序号验证：N(S) 必须等于期望值
             expected_seq = self.recv_seq
             if frame.send_seq != expected_seq:
-                logger.error(f"[I-RX] SEQUENCE ERROR: N(S)={frame.send_seq}, expected={expected_seq} - Disconnecting!")
+                logger.error(f"[I-RX] 序号错误: N(S)={frame.send_seq}, 期望={expected_seq} - 断开连接!")
                 writer.close()
                 await writer.wait_closed()
                 self.connected = False
                 return
             
-            # 更新接收序号
             self.recv_seq = (frame.send_seq + 1) & 0x7FFF
-            self.recv_count += 1  # 递增接收计数
+            self.recv_count += 1
 
             logger.info(f"[I-RX] N(S)={frame.send_seq} N(R)={frame.recv_seq}, "
-                       f"recv_count={self.recv_count}/{self.max_ack_delay}")
+                       f"接收计数={self.recv_count}/{self.max_ack_delay}")
 
-            # ========== 测试模式: no_ack ==========
             if self.test_mode == 'no_ack':
-                logger.warning(f"[TEST] no_ack模式: 不发送S帧确认")
+                logger.warning(f"[测试] no_ack模式: 不发送S帧确认")
             else:
-                # w值控制：收到w个I帧后立即发S帧确认
                 if self.recv_count >= self.max_ack_delay:
                     ack = FrameCodec.encode_s_format(self.recv_seq)
                     writer.write(ack)
                     await writer.drain()
-                    logger.info(f"[w-Control] w threshold reached: {self.recv_count} >= {self.max_ack_delay}")
-                    logger.info(f"[S-TX] Sent S-Frame N(R)={self.recv_seq} (acknowledged)")
+                    logger.info(f"[w控制] w阈值达到: {self.recv_count} >= {self.max_ack_delay}")
+                    logger.info(f"[S-TX] 发送S帧 N(R)={self.recv_seq}")
                     self.recv_count = 0
-                else:
-                    logger.debug(f"[w-Control] w threshold not reached, waiting...")
 
             await self.handle_i_format(frame, writer)
         elif frame.is_s_format:
-            # S格式确认序号验证：N(R) 不能大于已发送序号
-            # N(R) 表示期望接收的下一个序号，所以 N(R) 应该 <= send_seq
             if frame.recv_seq > self.send_seq:
-                logger.error(f"[S-RX] SEQUENCE ERROR: N(R)={frame.recv_seq} > send_seq={self.send_seq} - Disconnecting!")
+                logger.error(f"[S-RX] 序号错误: N(R)={frame.recv_seq} > sendSeq={self.send_seq} - 断开连接!")
                 writer.close()
                 await writer.wait_closed()
                 self.connected = False
                 return
             
-            # 更新最后确认序号
             old_ack = self.last_ack_seq
             self.last_ack_seq = frame.recv_seq
             
-            # 计算确认的帧数
-            confirmed = self.unconfirmed_frames()
-            was_unconfirmed = (old_ack - self.last_ack_seq) if old_ack >= self.last_ack_seq else (old_ack + 32768 - self.last_ack_seq)
             actual_confirmed = self.last_ack_seq - old_ack if self.last_ack_seq >= old_ack else (self.last_ack_seq + 32768 - old_ack)
             
-            logger.info(f"[S-RX] Peer acknowledged: N(R)={frame.recv_seq}, "
-                       f"send_seq={self.send_seq}, confirmed={actual_confirmed} frames, "
-                       f"unconfirmed={self.unconfirmed_frames()}")
+            logger.info(f"[S-RX] 收到确认: N(R)={frame.recv_seq}, "
+                       f"确认了 {actual_confirmed} 帧, 未确认={self.unconfirmed_frames()}")
 
     async def handle_u_format(self, frame: Frame, writer: asyncio.StreamWriter):
         """处理U格式帧"""
         u_type = frame.u_format_type
 
         if u_type == 0x07:  # STARTDT_ACT
-            logger.info("收到STARTDT启动命令")
+            logger.info("收到 STARTDT 启动命令")
             self.started = True
-            # 响应STARTDT_CON
             response = FrameCodec.encode_u_format(0x0B)
             writer.write(response)
             await writer.drain()
-            logger.info("发送STARTDT确认")
+            logger.info("发送 STARTDT 确认")
             
-            # ========== 测试模式: oversized_frame ==========
             if self.test_mode == 'oversized_frame':
                 await self.send_oversized_frame_test(writer)
             
-            # ========== 测试模式: flood ==========
             if self.test_mode == 'flood':
                 await self.send_flood_test(writer)
 
         elif u_type == 0x13:  # STOPDT_ACT
-            logger.info("收到STOPDT停止命令")
+            logger.info("收到 STOPDT 停止命令")
             self.started = False
-            # 响应STOPDT_CON
             response = FrameCodec.encode_u_format(0x23)
             writer.write(response)
             await writer.drain()
 
         elif u_type == 0x43:  # TESTFR_ACT
-            logger.info("收到TESTFR测试帧")
-            # 响应TESTFR_CON
+            logger.info("收到 TESTFR 测试帧")
             response = FrameCodec.encode_u_format(0x83)
             writer.write(response)
             await writer.drain()
     
     async def send_oversized_frame_test(self, writer: asyncio.StreamWriter):
-        """
-        发送超长帧测试 (P0: 帧长度校验)
+        """发送超长帧测试"""
+        logger.warning("[测试] 发送超长帧测试...")
         
-        发送超过最大允许长度(2045字节)的帧，测试主站是否会断开连接
-        """
-        logger.warning("[TEST] 发送超长帧测试...")
-        
-        # 构建超长帧 (3000字节ASDU)
+        asdu_addr = self.build_asdu_addr(1, 0)
         oversized_data = b'\x00' * 3000
-        asdu = ASDU(0x01, 1, 1, 0, self.device_addr, oversized_data)
+        asdu = ASDU(0x01, 1, 1, 0, asdu_addr, oversized_data)
         
-        # 手动构建帧头
         frame_data = bytearray()
-        frame_data.append(0x68)  # 启动字符
-        # 长度 = APCI(4) + ASDU长度 (3006 > 2045)
+        frame_data.append(0x68)
         length = 4 + len(asdu.encode())
-        frame_data.extend(struct.pack('<H', length))  # 2字节长度
-        # APCI (I格式)
-        frame_data.extend(struct.pack('<H', self.send_seq << 1))  # N(S)
-        frame_data.extend(struct.pack('<H', self.recv_seq << 1))  # N(R)
-        # ASDU
+        frame_data.extend(struct.pack('<H', length))
+        frame_data.extend(struct.pack('<H', self.send_seq << 1))
+        frame_data.extend(struct.pack('<H', self.recv_seq << 1))
         frame_data.extend(asdu.encode())
         
         writer.write(bytes(frame_data))
         await writer.drain()
         
-        logger.warning(f"[TEST] 已发送超长帧: ASDU长度={len(oversized_data)}, 总长度={length}")
+        logger.warning(f"[测试] 已发送超长帧: ASDU长度={len(oversized_data)}, 总长度={length}")
         self.send_seq = (self.send_seq + 1) & 0x7FFF
     
     async def send_flood_test(self, writer: asyncio.StreamWriter):
-        """
-        发送大量帧测试 (P0: 接收缓冲区限制)
-        
-        快速连续发送大量I帧，测试主站接收缓冲区处理
-        """
-        logger.warning("[TEST] 发送大量帧测试...")
+        """发送大量帧测试"""
+        logger.warning("[测试] 发送大量帧测试...")
         
         for i in range(50):
-            # 构建简单的遥信数据
+            device_addr = (i % 3) + 1
             asdu = ASDUBuilder.build_single_point(
-                self.device_addr, 200, i + 1, 2, cot=COT.SPONTANEOUS
+                device_addr, 200, i + 1, 2, cot=COT.SPONTANEOUS
             )
             frame = self.build_i_frame(asdu)
             writer.write(frame)
             
-            # 不等待drain，快速发送
             if (i + 1) % 10 == 0:
                 await writer.drain()
-                logger.info(f"[TEST] 已发送 {i + 1} 帧...")
+                logger.info(f"[测试] 已发送 {i + 1} 帧...")
         
         await writer.drain()
-        logger.warning(f"[TEST] 完成: 发送了 50 帧")
+        logger.warning(f"[测试] 完成: 发送了 50 帧")
 
     async def handle_i_format(self, frame: Frame, writer: asyncio.StreamWriter):
         """处理I格式帧"""
         if not self.started:
-            logger.warning("未启动,忽略I格式帧")
+            logger.warning("未启动, 忽略I格式帧")
             return
 
         asdu = ASDU.parse(frame.asdu_data)
-        logger.info(f"收到ASDU: TI={asdu.ti:02X} COT={asdu.cot} ADDR={asdu.asdu_addr}")
+        device_addr, cpu_no = self.parse_asdu_addr(asdu.asdu_addr)
+        
+        logger.info(f"收到ASDU: TI={asdu.ti:02X} COT={asdu.cot} 装置={device_addr} CPU={cpu_no}")
 
-        # ========== 测试模式: no_response ==========
         if self.test_mode == 'no_response':
-            logger.warning(f"[TEST] no_response模式: 不响应命令 (TI={asdu.ti:02X})")
+            logger.warning(f"[测试] no_response模式: 不响应命令 (TI={asdu.ti:02X})")
             return
 
         response = None
 
         if asdu.ti == TI.GI_CMD:
-            # 总召唤命令
-            response = await self.handle_gi_cmd(asdu)
+            response = await self.handle_gi_cmd(asdu, device_addr)
         elif asdu.ti == TI.GENERIC_READ:
-            # 通用分类读命令
-            response = await self.handle_generic_read(asdu)
+            response = await self.handle_generic_read(asdu, device_addr, cpu_no)
 
         if response:
             await self.send_response(response, writer)
             
-            # ========== 测试模式: ext_types ==========
             if self.test_mode == 'ext_types' and self.test_frame_sent == 0:
                 await self.send_extended_types_test(writer)
 
-    async def handle_gi_cmd(self, asdu: ASDU) -> Optional[bytes]:
+    async def handle_gi_cmd(self, asdu: ASDU, device_addr: int) -> Optional[bytes]:
         """处理总召唤命令"""
         fun, inf, scn = ASDUParser.parse_gi_cmd(asdu)
         self.current_scn = scn
-        logger.info(f"总召唤命令: FUN={fun} INF={inf} SCN={scn}")
+        logger.info(f"总召唤命令: 装置={device_addr} FUN={fun} INF={inf} SCN={scn}")
 
-        # 发送S格式确认
-        # (在send_response中处理)
-
-        # 生成遥信数据响应
         frames = []
+        
+        # 检查装置是否存在
+        device = self.get_device(device_addr)
+        if not device:
+            # 广播地址(255)或未知装置: 响应所有装置
+            if device_addr == 255 or device_addr == 0:
+                for dev_addr, dev in self.devices.items():
+                    frames.extend(self._build_gi_response(dev, scn))
+            else:
+                logger.warning(f"未知装置地址: {device_addr}")
+                return frames
+        else:
+            frames.extend(self._build_gi_response(device, scn))
 
-        # 获取总召唤遥信点
-        gi_points = self.digital_gen.get_gi_points()
+        logger.info(f"总召唤响应: {len(frames)} 帧")
+        return frames
 
-        # 分帧发送 (每帧最多20个点)
+    def _build_gi_response(self, device: DeviceConfig, scn: int) -> list:
+        """构建单个装置的总召唤响应"""
+        frames = []
+        asdu_addr = self.build_asdu_addr(device.device_addr, 0)
+        
+        gi_points = device.digital_gen.get_gi_points()
+        
         batch_size = 20
         for i in range(0, len(gi_points), batch_size):
             batch = gi_points[i:i+batch_size]
             points_data = [(p.fun, p.inf, int(p.value)) for p in batch]
 
             asdu_resp = ASDUBuilder.build_double_point(
-                self.device_addr, points_data, COT.GI, self.current_scn
+                device.device_addr, points_data, COT.GI, scn
             )
             frames.append(self.build_i_frame(asdu_resp))
 
-        # 发送总召唤结束
-        asdu_end = ASDUBuilder.build_gi_end(self.device_addr, self.current_scn)
+        asdu_end = ASDUBuilder.build_gi_end(device.device_addr, scn)
         frames.append(self.build_i_frame(asdu_end))
-
-        logger.info(f"总召唤响应: {len(gi_points)}个遥信点, {len(frames)}帧")
-
+        
         return frames
 
-    async def handle_generic_read(self, asdu: ASDU) -> Optional[bytes]:
+    async def handle_generic_read(self, asdu: ASDU, device_addr: int, cpu_no: int) -> Optional[bytes]:
         """处理通用分类读命令"""
         fun, inf, rii, gin_group, gin_entry, kod = ASDUParser.parse_generic_read(asdu)
-        logger.info(f"通用分类读: FUN={fun:02X} INF={inf:02X} RII={rii} GIN={gin_group}/{gin_entry} KOD={kod:02X}")
+        logger.info(f"通用分类读: 装置={device_addr} CPU={cpu_no} FUN={fun:02X} INF={inf:02X} "
+                   f"RII={rii} GIN={gin_group}/{gin_entry} KOD={kod:02X}")
 
         frames = []
+        
+        device = self.get_device(device_addr)
+        if not device:
+            logger.warning(f"未知装置: {device_addr}")
+            return frames
+        
+        if cpu_no not in device.generic_gens:
+            logger.warning(f"装置{device_addr} 无CPU{cpu_no}")
+            return frames
+        
+        generic_gen = device.generic_gens[cpu_no]
+        asdu_addr = self.build_asdu_addr(device_addr, cpu_no)
 
         if inf == INF.READ_GROUP_ALL:
-            # 读一组全部条目
-            frames = self.build_generic_group_response(rii, gin_group, gin_entry)
+            frames = self.build_generic_group_response(asdu_addr, generic_gen, rii, gin_group)
         elif inf == INF.READ_SINGLE_CATALOG:
-            # 读单个条目目录 (ASDU11响应)
-            frames = self.build_catalog_response(rii, gin_group, gin_entry, kod)
+            frames = self.build_catalog_response(asdu_addr, generic_gen, rii, gin_group, gin_entry, kod)
         elif inf == INF.READ_SINGLE_VALUE:
-            # 读单个条目
-            frames = self.build_generic_single_response(rii, gin_group, gin_entry)
+            frames = self.build_generic_single_response(asdu_addr, generic_gen, rii, gin_group, gin_entry)
 
         return frames
     
-    def build_catalog_response(self, rii: int, group: int, entry: int, kod: int) -> list:
-        """
-        构建ASDU11目录响应
-        
-        目录包含多个KOD的描述:
-        - KOD 0x01: 实际值
-        - KOD 0x0A: 描述
-        - KOD 0x67: 属性结构
-        """
+    def build_catalog_response(self, asdu_addr: int, gen: GenericDataGenerator, 
+                               rii: int, group: int, entry: int, kod: int) -> list:
+        """构建ASDU11目录响应"""
         frames = []
         
-        # 获取数据点
-        point = self.generic_gen.get_point(group, entry)
+        point = gen.get_point(group, entry)
         if not point:
             logger.warning(f"未找到数据点: 组{group} 条目{entry}")
             return frames
         
-        # 构建目录条目
         entries = []
         
         # 实际值 (KOD=0x01)
-        if point.data_type == GenericDataGenerator.DATA_TYPE_FLOAT:
+        if point.data_type == 7:
             entries.append((KOD.ACTUAL_VALUE, DataType.R32_23, 4, struct.pack('<f', float(point.value))))
-        elif point.data_type == GenericDataGenerator.DATA_TYPE_UINT:
+        elif point.data_type == 3:
             entries.append((KOD.ACTUAL_VALUE, DataType.UNSIGNED, 4, struct.pack('<I', int(point.value))))
-        elif point.data_type == GenericDataGenerator.DATA_TYPE_INT:
-            entries.append((KOD.SIGNED, DataType.SIGNED, 4, struct.pack('<i', int(point.value))))
-        elif point.data_type == GenericDataGenerator.DATA_TYPE_ASCII:
+        elif point.data_type == 4:
+            entries.append((KOD.ACTUAL_VALUE, DataType.SIGNED, 4, struct.pack('<i', int(point.value))))
+        elif point.data_type == 1:
             encoded = point.value.encode('ascii')[:20] if isinstance(point.value, str) else str(point.value).encode('ascii')[:20]
             entries.append((KOD.ACTUAL_VALUE, DataType.OS8ASCII, len(encoded), encoded))
-        elif point.data_type == GenericDataGenerator.DATA_TYPE_DPI:
+        elif point.data_type == 9:
             entries.append((KOD.ACTUAL_VALUE, DataType.DPI, 1, bytes([int(point.value) & 0x03])))
         
         # 描述 (KOD=0x0A)
         desc = point.name.encode('ascii')[:20]
         entries.append((KOD.DESCRIPTION, DataType.OS8ASCII, len(desc), desc))
         
-        # 属性结构 (KOD=0x67) - 南网扩展
-        # 简化版本：包含数据类型、量程等
-        attr_data = bytearray()
-        attr_data.append(point.data_type)  # 数据类型
-        attr_data.extend(struct.pack('<f', float(point.min_val) if point.min_val else 0))  # 最小值
-        attr_data.extend(struct.pack('<f', float(point.max_val) if point.max_val else 0))  # 最大值
-        attr_data.extend(point.unit.encode('ascii')[:8].ljust(8, b'\x00'))  # 单位
-        entries.append((KOD.ATTRIBUTE, DataType.DATA_STRUCTURE, len(attr_data), bytes(attr_data)))
-        
-        asdu_resp = ASDUBuilder.build_catalog_data(
-            self.device_addr, rii, group, entry, entries
-        )
+        asdu_resp = ASDUBuilder.build_catalog_data(asdu_addr, rii, group, entry, entries)
         frames.append(self.build_i_frame(asdu_resp))
         
         logger.info(f"ASDU11目录响应: 组{group} 条目{entry} {len(entries)}个KOD")
@@ -439,171 +567,157 @@ class IEC103Slave:
         return frames
     
     async def send_extended_types_test(self, writer: asyncio.StreamWriter):
-        """
-        发送南网扩展数据类型测试 (213-217)
+        """发送南网扩展数据类型测试 (213-217)"""
+        logger.info("[测试] 发送南网扩展数据类型测试...")
         
-        DataType 213: 带绝对时间的七字节时标报文
-        DataType 214: 带相对时间的七字节时标报文
-        DataType 215: 带相对时间七字节时标的浮点值
-        DataType 216: 带相对时间七字节时标的整形值
-        DataType 217: 带相对时间七字节时标的字符值
-        """
-        logger.info("[TEST] 发送南网扩展数据类型测试...")
-        
-        # DataType 215: 带相对时间七字节时标的浮点值
-        asdu_215 = ASDUBuilder.build_generic_data_with_time(
-            self.device_addr, 1, 100, 1, 
-            DataType.FLOAT_WITH_TIME, 123.45,
-            relative_time=500, fault_num=1
-        )
-        frame_215 = self.build_i_frame(asdu_215)
-        writer.write(frame_215)
-        await writer.drain()
-        logger.info(f"[TEST] 发送 DataType 215 (带时标浮点): 123.45")
-        
-        # DataType 216: 带相对时间七字节时标的整形值
-        asdu_216 = ASDUBuilder.build_generic_data_with_time(
-            self.device_addr, 2, 100, 2,
-            DataType.INT_WITH_TIME, 65535,
-            relative_time=1000, fault_num=2
-        )
-        frame_216 = self.build_i_frame(asdu_216)
-        writer.write(frame_216)
-        await writer.drain()
-        logger.info(f"[TEST] 发送 DataType 216 (带时标整数): 65535")
-        
-        # DataType 217: 带相对时间七字节时标的字符值
-        asdu_217 = ASDUBuilder.build_generic_data_with_time(
-            self.device_addr, 3, 100, 3,
-            DataType.CHAR_WITH_TIME, 0x41,  # 'A'
-            relative_time=1500, fault_num=3
-        )
-        frame_217 = self.build_i_frame(asdu_217)
-        writer.write(frame_217)
-        await writer.drain()
-        logger.info(f"[TEST] 发送 DataType 217 (带时标字符): A")
+        for device_addr, device in self.devices.items():
+            for cpu in device.cpus:
+                asdu_addr = self.build_asdu_addr(device_addr, cpu)
+                
+                # DataType 215: 带时标浮点
+                asdu_215 = ASDUBuilder.build_generic_data_with_time(
+                    asdu_addr, 1, 100, 1, 
+                    DataType.FLOAT_WITH_TIME, device_addr * 100 + cpu + 123.45,
+                    relative_time=500, fault_num=device_addr
+                )
+                writer.write(self.build_i_frame(asdu_215))
+                await writer.drain()
+                logger.info(f"[测试] 发送 DataType 215: 装置{device_addr} CPU{cpu}")
+                
+                # DataType 216: 带时标整数
+                asdu_216 = ASDUBuilder.build_generic_data_with_time(
+                    asdu_addr, 2, 100, 2,
+                    DataType.INT_WITH_TIME, device_addr * 1000 + cpu * 100,
+                    relative_time=1000, fault_num=device_addr
+                )
+                writer.write(self.build_i_frame(asdu_216))
+                await writer.drain()
+                logger.info(f"[测试] 发送 DataType 216: 装置{device_addr} CPU{cpu}")
+                
+                # DataType 217: 带时标字符
+                asdu_217 = ASDUBuilder.build_generic_data_with_time(
+                    asdu_addr, 3, 100, 3,
+                    DataType.CHAR_WITH_TIME, f"FAULT_D{device_addr}_C{cpu}",
+                    relative_time=1500, fault_num=device_addr
+                )
+                writer.write(self.build_i_frame(asdu_217))
+                await writer.drain()
+                logger.info(f"[测试] 发送 DataType 217: 装置{device_addr} CPU{cpu}")
         
         self.test_frame_sent = 1
-        logger.info("[TEST] 南网扩展数据类型测试完成")
+        logger.info("[测试] 南网扩展数据类型测试完成")
 
-    def build_generic_group_response(self, rii: int, group: int, entry: int) -> list:
-        """构建通用分类组数据响应 (遥测/遥脉统一)"""
+    def build_generic_group_response(self, asdu_addr: int, gen: GenericDataGenerator, 
+                                     rii: int, group: int) -> list:
+        """构建通用分类组数据响应"""
         frames = []
 
-        # 更新数据（模拟数据变化）
-        self.generic_gen.update()
+        gen.update()
         
-        # 获取指定组的数据点
-        points = self.generic_gen.get_group_points(group)
-        items = []
+        points = gen.get_group_points(group)
+        
+        # 分离普通类型和南网扩展类型
+        normal_items = []
+        ext_type_points = []
         
         for p in points:
-            # 根据数据类型设置参数
-            data_type = p.data_type  # 直接使用定义的数据类型
-            
-            if data_type == GenericDataGenerator.DATA_TYPE_ASCII:
-                # ASCII字符串
-                data_size = min(len(str(p.value)), 20)  # 最大20字节
+            if p.data_type in [213, 214, 215, 216, 217]:
+                # 南网扩展类型单独处理
+                ext_type_points.append(p)
+            elif p.data_type == 1:
+                data_size = min(len(str(p.value)), 20)
                 item = GenericDataItem(
-                    gin_group=p.group,
-                    gin_entry=p.entry,
+                    gin_group=p.group, gin_entry=p.entry,
                     kod=KOD.ACTUAL_VALUE,
                     data_type=DataType.OS8ASCII,
-                    data_size=data_size,
-                    value=p.value
+                    data_size=data_size, value=p.value
                 )
-            elif data_type == GenericDataGenerator.DATA_TYPE_UINT:
-                # 无符号整数
+                normal_items.append(item)
+            elif p.data_type == 3:
                 item = GenericDataItem(
-                    gin_group=p.group,
-                    gin_entry=p.entry,
+                    gin_group=p.group, gin_entry=p.entry,
                     kod=KOD.ACTUAL_VALUE,
                     data_type=DataType.UNSIGNED,
-                    data_size=4,
-                    value=p.value
+                    data_size=4, value=p.value
                 )
-            elif data_type == GenericDataGenerator.DATA_TYPE_INT:
-                # 有符号整数
+                normal_items.append(item)
+            elif p.data_type == 4:
                 item = GenericDataItem(
-                    gin_group=p.group,
-                    gin_entry=p.entry,
+                    gin_group=p.group, gin_entry=p.entry,
                     kod=KOD.ACTUAL_VALUE,
                     data_type=DataType.SIGNED,
-                    data_size=4,
-                    value=p.value
+                    data_size=4, value=p.value
                 )
-            elif data_type == GenericDataGenerator.DATA_TYPE_FLOAT:
-                # 浮点数 (R32.23)
+                normal_items.append(item)
+            elif p.data_type == 7:
                 item = GenericDataItem(
-                    gin_group=p.group,
-                    gin_entry=p.entry,
+                    gin_group=p.group, gin_entry=p.entry,
                     kod=KOD.ACTUAL_VALUE,
                     data_type=DataType.R32_23,
-                    data_size=4,
-                    value=p.value
+                    data_size=4, value=p.value
                 )
-            elif data_type == GenericDataGenerator.DATA_TYPE_DPI:
-                # 双点信息
+                normal_items.append(item)
+            elif p.data_type == 9:
                 item = GenericDataItem(
-                    gin_group=p.group,
-                    gin_entry=p.entry,
+                    gin_group=p.group, gin_entry=p.entry,
                     kod=KOD.ACTUAL_VALUE,
                     data_type=DataType.DPI,
-                    data_size=1,
-                    value=p.value
+                    data_size=1, value=p.value
                 )
+                normal_items.append(item)
             else:
-                # 默认浮点
                 item = GenericDataItem(
-                    gin_group=p.group,
-                    gin_entry=p.entry,
+                    gin_group=p.group, gin_entry=p.entry,
                     kod=KOD.ACTUAL_VALUE,
                     data_type=DataType.R32_23,
-                    data_size=4,
-                    value=p.value
+                    data_size=4, value=p.value
                 )
-            items.append(item)
+                normal_items.append(item)
 
-        if items:
-            asdu_resp = ASDUBuilder.build_generic_data(
-                self.device_addr, rii, items, COT.GENERIC_DATA_RESP
+        # 发送普通类型数据
+        if normal_items:
+            asdu_resp = ASDUBuilder.build_generic_data(asdu_addr, rii, normal_items, COT.GENERIC_DATA_RESP)
+            frames.append(self.build_i_frame(asdu_resp))
+        
+        # 发送南网扩展类型数据 (每个条目单独一帧，因为包含时标)
+        for p in ext_type_points:
+            asdu_resp = ASDUBuilder.build_generic_data_with_time(
+                asdu_addr, rii, p.group, p.entry, p.data_type, p.value
             )
             frames.append(self.build_i_frame(asdu_resp))
-            type_names = {1: "ASCII", 3: "UINT", 4: "INT", 7: "FLOAT", 9: "DPI"}
+
+        if normal_items or ext_type_points:
+            type_names = {1: "ASCII", 3: "UINT", 4: "INT", 7: "FLOAT", 9: "DPI",
+                         213: "时标213", 214: "时标214", 215: "浮点215", 216: "整数216", 217: "字符217"}
             type_str = type_names.get(points[0].data_type if points else 0, "未知")
-            logger.info(f"通用服务响应: 组{group} {len(items)}个点 (类型={type_str})")
+            device_addr, cpu_no = self.parse_asdu_addr(asdu_addr)
+            logger.info(f"通用服务响应: 装置{device_addr} CPU{cpu_no} 组{group} {len(normal_items)}普通+{len(ext_type_points)}扩展 (类型={type_str})")
 
         return frames
 
-    def build_generic_single_response(self, rii: int, group: int, entry: int) -> list:
-        """构建单个条目响应 (遥测/遥脉统一)"""
+    def build_generic_single_response(self, asdu_addr: int, gen: GenericDataGenerator,
+                                      rii: int, group: int, entry: int) -> list:
+        """构建单个条目响应"""
         frames = []
 
-        # 更新数据
-        self.generic_gen.update()
+        gen.update()
         
-        # 查找数据点
-        point = self.generic_gen.get_point(group, entry)
+        point = gen.get_point(group, entry)
         if point:
-            # 根据 data_type 判断数据类型
-            if point.data_type == GenericDataGenerator.DATA_TYPE_FLOAT:
-                data_type = DataType.FLOAT
-            elif point.data_type == GenericDataGenerator.DATA_TYPE_UINT:
+            if point.data_type == 7:
+                data_type = DataType.R32_23
+            elif point.data_type == 3:
                 data_type = DataType.UNSIGNED
             else:
-                data_type = DataType.FLOAT
+                data_type = DataType.R32_23
             
             item = GenericDataItem(
-                gin_group=point.group,
-                gin_entry=point.entry,
+                gin_group=point.group, gin_entry=point.entry,
                 kod=KOD.ACTUAL_VALUE,
                 data_type=data_type,
-                data_size=4,
-                value=point.value
+                data_size=4, value=point.value
             )
-            asdu_resp = ASDUBuilder.build_generic_data(
-                self.device_addr, rii, [item], COT.GENERIC_DATA_RESP
-            )
+            asdu_resp = ASDUBuilder.build_generic_data(asdu_addr, rii, [item], COT.GENERIC_DATA_RESP)
             frames.append(self.build_i_frame(asdu_resp))
 
         return frames
@@ -612,109 +726,94 @@ class IEC103Slave:
         """构建I格式帧"""
         apci = APCI('I', self.send_seq, self.recv_seq)
         frame = FrameCodec.encode(apci, asdu.encode())
-        unconfirmed = self.unconfirmed_frames() + 1  # 发送后未确认数
-        logger.info(f"[I-TX] N(S)={self.send_seq} N(R)={self.recv_seq}, TI={asdu.ti}, unconfirmed={unconfirmed}")
+        unconfirmed = self.unconfirmed_frames() + 1
+        logger.info(f"[I-TX] N(S)={self.send_seq} N(R)={self.recv_seq}, TI={asdu.ti}, 未确认={unconfirmed}")
         self.send_seq = (self.send_seq + 1) & 0x7FFF
         return frame
 
     async def send_response(self, response, writer: asyncio.StreamWriter):
-        """发送响应（实现k值控制）"""
+        """发送响应"""
         if isinstance(response, list):
-            logger.info(f"[I-TX] Sending {len(response)} I-frames...")
-            sent_count = 0
+            logger.info(f"[I-TX] 发送 {len(response)} 个I帧...")
             for i, frame in enumerate(response):
-                # k值控制：检查未确认帧数
+                # k值控制：未确认数>=k时打印警告（不阻塞）
                 unconfirmed = self.unconfirmed_frames()
                 if unconfirmed >= self.max_unconfirmed:
-                    logger.warning(f"[k-Control] Send blocked at frame {i+1}/{len(response)}: "
-                                 f"unconfirmed={unconfirmed} >= k={self.max_unconfirmed}")
-                    logger.info(f"[k-Control] Waiting for master's S-Frame acknowledgment...")
-                    # 在实际实现中，这里应该等待主站的S帧确认
-                    # 为了简化，我们继续发送（但会记录警告）
+                    logger.warning(f"[k控制] 第{i+1}/{len(response)}帧发送: "
+                                 f"未确认={unconfirmed} >= k={self.max_unconfirmed}")
                 
                 writer.write(frame)
                 await writer.drain()
-                sent_count += 1
-                logger.debug(f"[I-TX] Frame {i+1}/{len(response)} sent")
         else:
             writer.write(response)
             await writer.drain()
 
-    async def send_spontaneous_event(self, writer: asyncio.StreamWriter):
+    async def send_spontaneous_event(self, writer: asyncio.StreamWriter, device_addr: int, cpu: int):
         """发送突发遥信事件 (ASDU1)"""
         if not self.started or not self.connected:
             return
 
-        # 随机选择一个遥信点发送
-        import random
-        points = self.digital_gen.get_gi_points()
+        device = self.get_device(device_addr)
+        if not device:
+            return
+
+        points = device.digital_gen.get_gi_points()
         if points:
             point = random.choice(points)
-            # 翻转状态
             point.value = not point.value
 
-            # 构建ASDU1
             asdu = ASDUBuilder.build_single_point(
-                self.device_addr,
+                device_addr,
                 point.fun,
                 point.inf,
-                2 if point.value else 1,  # DPI: 1=OFF, 2=ON
+                2 if point.value else 1,
                 cot=COT.SPONTANEOUS
             )
             frame = self.build_i_frame(asdu)
             writer.write(frame)
             await writer.drain()
 
-            logger.info(f"突发遥信 (ASDU1): FUN={point.fun:02X} INF={point.inf:02X} DPI={2 if point.value else 1}")
+            logger.info(f"突发遥信(ASDU1): 装置{device_addr} CPU{cpu} FUN={point.fun:02X} INF={point.inf:02X}")
 
-    async def send_protection_event(self, writer: asyncio.StreamWriter):
+    async def send_protection_event(self, writer: asyncio.StreamWriter, device_addr: int, cpu: int):
         """发送保护动作事件 (ASDU2)"""
         if not self.started or not self.connected:
             return
+        
+        asdu_addr = self.build_asdu_addr(device_addr, cpu)
 
-        # 构建ASDU2 - 保护动作事件
         data = bytearray()
-        data.append(0x80)  # FUN = 距离保护
-        data.append(0x01)  # INF = 保护动作
-        data.append(0x02)  # DPI = ON (动作)
-        data.extend(struct.pack('<H', 100))  # RET = 相对时间 100ms
-        data.extend(struct.pack('<H', 1))    # FAN = 故障序号 1
-        # 时标1 (实际发生时间)
-        data.extend(CP56Time2a.now().encode())
-        # 时标2 (子站接收时间)
-        data.extend(CP56Time2a.now().encode())
-        # SIN (故障相别)
-        data.append(0x89)  # A相接地故障
+        data.append(0x80)  # FUN
+        data.append(0x01)  # INF
+        data.append(0x02)  # DPI = ON
+        data.extend(struct.pack('<H', 100))  # RET
+        data.extend(struct.pack('<H', device_addr))  # FAN
+        data.extend(CP56Time2a.now().encode())  # 事件时间
+        data.extend(CP56Time2a.now().encode())  # 接收时间
+        data.append(0x89)  # SIN (A相接地故障)
 
-        asdu = ASDU(TI.DOUBLE_POINT_TIME, 1, COT.SPONTANEOUS, 0, self.device_addr, bytes(data))
+        asdu = ASDU(TI.DOUBLE_POINT_TIME, 1, COT.SPONTANEOUS, 0, asdu_addr, bytes(data))
         frame = self.build_i_frame(asdu)
         writer.write(frame)
         await writer.drain()
 
-        logger.info(f"保护动作事件 (ASDU2): FUN=80 INF=01 DPI=02 FAN=1")
+        logger.info(f"保护事件(ASDU2): 装置{device_addr} CPU{cpu} 故障号={device_addr}")
 
 
 async def main():
-    parser = argparse.ArgumentParser(description='IEC103子站模拟器')
+    parser = argparse.ArgumentParser(description='IEC103子站模拟器 (多装置多CPU)')
     parser.add_argument('--host', default='0.0.0.0', help='监听地址')
     parser.add_argument('--port', type=int, default=2404, help='监听端口')
-    parser.add_argument('--device', type=int, default=1, help='装置地址')
     parser.add_argument('--log-level', default='info', help='日志级别')
     parser.add_argument('--test-mode', default='normal',
                        choices=['normal', 'no_ack', 'oversized_frame', 'no_response', 'flood', 'ext_types'],
-                       help='''测试模式:
-                         normal: 正常模式
-                         no_ack: 不发送S帧确认(测试k值阻塞超时)
-                         oversized_frame: 发送超长帧(测试帧长度校验)
-                         no_response: 不响应命令(测试T1超时)
-                         flood: 快速发送大量帧(测试缓冲区限制)
-                         ext_types: 发送南网扩展数据类型(213-217)''')
+                       help='测试模式')
     
     args = parser.parse_args()
     
     logging.getLogger().setLevel(getattr(logging, args.log_level.upper()))
     
-    slave = IEC103Slave(args.device, args.test_mode)
+    slave = MultiDeviceSlave(args.test_mode)
     
     server = await asyncio.start_server(
         slave.handle_client,
@@ -724,23 +823,25 @@ async def main():
     
     addr = server.sockets[0].getsockname()
     logger.info(f"IEC103子站模拟器启动: {addr[0]}:{addr[1]}")
-    logger.info(f"装置地址: {args.device}")
     logger.info(f"测试模式: {args.test_mode}")
     logger.info(f"k值(最大未确认帧数): {slave.max_unconfirmed}")
     logger.info(f"w值(确认阈值): {slave.max_ack_delay}")
     
+    # 打印装置配置
+    logger.info("=" * 50)
+    logger.info("装置配置:")
+    for device_addr, device in slave.devices.items():
+        logger.info(f"  装置{device_addr} ({device.name}):")
+        for cpu in device.cpus:
+            asdu_addr = slave.build_asdu_addr(device_addr, cpu)
+            logger.info(f"    CPU{cpu}: ASDU地址=0x{asdu_addr:04X}")
+            gen = device.generic_gens[cpu]
+            groups = sorted(set(p.group for p in gen.points))
+            logger.info(f"           数据组: {groups}")
+    logger.info("=" * 50)
+    
     if args.test_mode != 'normal':
         logger.warning(f"========== 测试模式: {args.test_mode} ==========")
-        if args.test_mode == 'no_ack':
-            logger.warning("[TEST] 将不发送S帧确认，测试主站k值阻塞超时")
-        elif args.test_mode == 'oversized_frame':
-            logger.warning("[TEST] 连接后发送超长帧，测试主站帧长度校验")
-        elif args.test_mode == 'no_response':
-            logger.warning("[TEST] 不响应任何I格式命令，测试主站T1超时")
-        elif args.test_mode == 'flood':
-            logger.warning("[TEST] 连接后快速发送大量帧，测试缓冲区限制")
-        elif args.test_mode == 'ext_types':
-            logger.warning("[TEST] 发送南网扩展数据类型(213-217)")
     
     async with server:
         await server.serve_forever()

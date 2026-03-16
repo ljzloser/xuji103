@@ -17,6 +17,7 @@ class TI(IntEnum):
     GI_CMD = 0x07                # 总召唤命令
     GI_END = 0x08                # 总召唤结束
     GENERIC_DATA = 0x0A          # 通用分类数据
+    GENERIC_IDENT = 0x0B         # 通用分类标识 (ASDU11)
     GENERIC_READ = 0x15          # 通用分类读命令 (21)
     DOUBLE_POINT = 0x2A          # 双点信息状态 (42)
 
@@ -161,7 +162,7 @@ class ASDU:
     vsq: int = 1                 # 可变结构限定词
     cot: int = 1                 # 传输原因
     pn: int = 0                  # P/N位 (0=肯定, 1=否定)
-    asdu_addr: int = 0           # ASDU地址 (2字节)
+    asdu_addr: int = 0           # ASDU地址 (2字节, 南网规范: 高字节=设备地址)
     data: bytes = b''            # 信息体数据
     
     def encode(self) -> bytes:
@@ -174,7 +175,7 @@ class ASDU:
         # COT (2字节: 低字节=COT, 高字节=P/N位)
         result.append(self.cot & 0xFF)
         result.append(self.pn & 0x01)
-        # ASDU地址 (2字节, 小端)
+        # ASDU地址 (2字节, 小端, 南网规范)
         result.extend(struct.pack('<H', self.asdu_addr))
         # 信息体
         result.extend(self.data)
@@ -202,10 +203,10 @@ class GenericDataItem:
     gin_group: int = 0           # 组号
     gin_entry: int = 0           # 条目号
     kod: int = KOD.ACTUAL_VALUE  # 描述类别
-    data_type: int = DataType.FLOAT
+    data_type: int = DataType.R32_23
     data_size: int = 4
-    data_count: int = 1
     value: Any = 0.0
+    data_count: int = 1          # 数据元素数目
     
     def encode(self) -> bytes:
         """编码数据项"""
@@ -260,7 +261,7 @@ class ASDUParser:
     """ASDU解析器"""
     
     @staticmethod
-    def parse_gi_cmd(asdu: ASDU) -> Tuple[int, int]:
+    def parse_gi_cmd(asdu: ASDU) -> Tuple[int, int, int]:
         """解析总召唤命令 (ASDU7)"""
         # FUN + INF + SCN
         fun = asdu.data[0]
@@ -269,7 +270,7 @@ class ASDUParser:
         return fun, inf, scn
     
     @staticmethod
-    def parse_generic_read(asdu: ASDU) -> Tuple[int, int, int, int]:
+    def parse_generic_read(asdu: ASDU) -> Tuple[int, int, int, int, int, int]:
         """解析通用分类读命令 (ASDU21)"""
         # FUN + INF + RII + NGD + GIN(组/条目) + KOD
         fun = asdu.data[0]
@@ -286,8 +287,43 @@ class ASDUBuilder:
     """ASDU构建器"""
     
     @staticmethod
-    def build_gi_end(asdu_addr: int, scn: int = 0) -> ASDU:
+    def build_asdu_addr(device_addr: int, cpu_no: int = 0, setting_zone: int = 0) -> int:
+        """
+        构建南网规范ASDU地址 (2字节)
+        高字节 = 设备地址 (1-254)
+        低字节: D7-D3 = 定值区号, D2-D0 = CPU号
+        """
+        low_byte = ((setting_zone & 0x1F) << 3) | (cpu_no & 0x07)
+        return (device_addr << 8) | low_byte
+    
+    @staticmethod
+    def build_gi_cmd(asdu_addr: int, scn: int = 1) -> ASDU:
+        """
+        构建总召唤命令 (ASDU7)
+        asdu_addr: 完整的2字节ASDU地址
+        """
+        data = bytes([
+            FUN.GLB,    # FUN = 255
+            INF.GI_START,  # INF = 0
+            scn         # SCN = 扫描序号
+        ])
+        return ASDU(TI.GI_CMD, 1, COT.GI, 0, asdu_addr, data)
+    
+    @staticmethod
+    def build_gi_cmd(device_addr: int, scn: int = 1) -> ASDU:
+        """构建总召唤命令 (ASDU7)"""
+        asdu_addr = ASDUBuilder.build_asdu_addr(device_addr)
+        data = bytes([
+            FUN.GLB,    # FUN
+            INF.GI_START,  # INF
+            scn         # SCN
+        ])
+        return ASDU(TI.GI_CMD, 1, COT.GI, 0, asdu_addr, data)
+    
+    @staticmethod
+    def build_gi_end(device_addr: int, scn: int = 0) -> ASDU:
         """构建总召唤结束 (ASDU8)"""
+        asdu_addr = ASDUBuilder.build_asdu_addr(device_addr)
         data = bytes([
             FUN.GLB,    # FUN
             INF.GI_START,  # INF
@@ -296,12 +332,26 @@ class ASDUBuilder:
         return ASDU(TI.GI_END, 1, COT.GI_TERMINATE, 0, asdu_addr, data)
     
     @staticmethod
-    def build_double_point(asdu_addr: int, points: List[Tuple[int, int, int]], 
+    def build_read_group(asdu_addr: int, group: int, kod: int = KOD.ACTUAL_VALUE) -> ASDU:
+        """构建读一组全部条目命令 (ASDU21 INF=241)"""
+        data = bytearray()
+        data.append(FUN.GEN)  # FUN
+        data.append(INF.READ_GROUP_ALL)  # INF = 241
+        data.append(1)  # RII
+        data.append(1)  # NGD
+        data.append(group)  # GIN group
+        data.append(0xFF)  # GIN entry (0xFF表示组标题)
+        data.append(kod)  # KOD
+        return ASDU(TI.GENERIC_READ, 1, COT.GENERIC_DATA_RESP, 0, asdu_addr, bytes(data))
+    
+    @staticmethod
+    def build_double_point(device_addr: int, points: List[Tuple[int, int, int]], 
                            cot: int = COT.GI, scn: int = 0) -> ASDU:
         """
         构建双点遥信 (ASDU42)
         points: [(fun, inf, dpi), ...]
         """
+        asdu_addr = ASDUBuilder.build_asdu_addr(device_addr)
         data = bytearray()
         for fun, inf, dpi in points:
             data.append(fun)
@@ -316,6 +366,7 @@ class ASDUBuilder:
                            fun: int = FUN.GEN, inf: int = INF.READ_GROUP_ALL) -> ASDU:
         """
         构建通用分类数据 (ASDU10)
+        asdu_addr: 完整的2字节ASDU地址 (高字节=设备地址)
         """
         data = bytearray()
         # FUN + INF (南网规范)
@@ -333,12 +384,13 @@ class ASDUBuilder:
         return ASDU(TI.GENERIC_DATA, 1, cot, 0, asdu_addr, bytes(data))
     
     @staticmethod
-    def build_single_point(asdu_addr: int, fun: int, inf: int, dpi: int,
+    def build_single_point(device_addr: int, fun: int, inf: int, dpi: int,
                            time1: CP56Time2a = None, time2: CP56Time2a = None,
                            cot: int = COT.SPONTANEOUS) -> ASDU:
         """
         构建单点遥信 (ASDU1) - 南网扩展带双时标
         """
+        asdu_addr = ASDUBuilder.build_asdu_addr(device_addr)
         data = bytearray()
         data.append(fun)
         data.append(inf)
@@ -388,7 +440,7 @@ class ASDUBuilder:
             data.append(1)  # GDD.Number
             data.extend(gid)  # GID
         
-        return ASDU(0x0B, 1, cot, 0, asdu_addr, bytes(data))  # TI=0x0B=11
+        return ASDU(TI.GENERIC_IDENT, 1, cot, 0, asdu_addr, bytes(data))
     
     @staticmethod
     def build_generic_data_with_time(asdu_addr: int, rii: int, 
@@ -400,10 +452,12 @@ class ASDUBuilder:
         """
         构建带时标的通用分类数据 (南网扩展数据类型 215/216/217)
         
-        data_type: 
-            215 = 带相对时间七字节时标的浮点值
-            216 = 带相对时间七字节时标的整形值
-            217 = 带相对时间七字节时标的字符值
+        数据格式 (参考南网规范 图表29):
+        - DataType 215: VAL(4) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 22字节
+        - DataType 216: VAL(4,FPT+JPT) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 22字节
+        - DataType 217: VAL(40) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 58字节
+        
+        asdu_addr: 完整的2字节ASDU地址
         """
         data = bytearray()
         # FUN + INF
@@ -423,33 +477,40 @@ class ASDUBuilder:
         
         # 计算数据大小
         if data_type == DataType.FLOAT_WITH_TIME:  # 215
-            # RET(2) + FAN(2) + Time(7) + Float(4) = 15字节
-            data_size = 15
+            # VAL(4) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 22字节
+            data_size = 22
         elif data_type == DataType.INT_WITH_TIME:  # 216
-            # RET(2) + FAN(2) + Time(7) + Int(4) = 15字节
-            data_size = 15
+            # VAL(4) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 22字节
+            data_size = 22
         elif data_type == DataType.CHAR_WITH_TIME:  # 217
-            # RET(2) + FAN(2) + Time(7) + Char(1) = 12字节
-            data_size = 12
+            # VAL(40) + RET(2) + NOF(2) + TIME(7) + RECV_TIME(7) = 58字节
+            data_size = 58
         else:
-            data_size = 15
+            data_size = 22
         
         data.append(data_size)  # DataSize
         data.append(1)  # Number
         
         # GID - 构建数据
-        # 相对时间 (2字节)
-        data.extend(struct.pack('<H', relative_time))
-        # 故障序号 (2字节)
-        data.extend(struct.pack('<H', fault_num))
-        # 7字节时标
-        data.extend(CP56Time2a.now().encode())
-        # 实际数据
+        # 实际数据值 (偏移0-3或0-39)
         if data_type == DataType.FLOAT_WITH_TIME:
             data.extend(struct.pack('<f', float(value)))
         elif data_type == DataType.INT_WITH_TIME:
+            # 低字节=FPT故障相别, 高字节=JPT跳闸相别
             data.extend(struct.pack('<I', int(value)))
         elif data_type == DataType.CHAR_WITH_TIME:
-            data.append(int(value) & 0xFF)
+            # 40字节ASCII字符串
+            char_data = str(value).encode('ascii')[:40]
+            data.extend(char_data)
+            data.extend(b'\x00' * (40 - len(char_data)))
+        
+        # 相对时间 RET (2字节) - 偏移4-5
+        data.extend(struct.pack('<H', relative_time))
+        # 故障序号 NOF (2字节) - 偏移6-7
+        data.extend(struct.pack('<H', fault_num))
+        # 故障时间 CP56Time2a (7字节) - 偏移8-14
+        data.extend(CP56Time2a.now().encode())
+        # 子站接收时间 CP56Time2a (7字节) - 偏移15-21
+        data.extend(CP56Time2a.now().encode())
         
         return ASDU(TI.GENERIC_DATA, 1, cot, 0, asdu_addr, bytes(data))

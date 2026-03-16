@@ -35,16 +35,16 @@ class APCI:
         
         # 判断帧格式
         if byte1 & 0x01 == 0:
-            # I格式: N(S)低8位, LSB=0
+            # I格式: N(S)低7位在byte1高7位, N(S)高8位在byte2
             format_type = 'I'
-            send_seq = ((data[1] & 0xFE) << 7) | (byte1 >> 1)
-            recv_seq = ((data[3] & 0xFE) << 7) | (data[2] >> 1)
+            send_seq = (data[1] << 7) | (byte1 >> 1)
+            recv_seq = (data[3] << 7) | (data[2] >> 1)
             return APCI(format_type, send_seq, recv_seq)
         
         elif byte1 == 0x01:
             # S格式: 00000001
             format_type = 'S'
-            recv_seq = ((data[3] & 0xFE) << 7) | (data[2] >> 1)
+            recv_seq = (data[3] << 7) | (data[2] >> 1)
             return APCI(format_type, 0, recv_seq)
         
         else:
@@ -56,17 +56,19 @@ class APCI:
     def encode(self) -> bytes:
         """编码为4字节"""
         if self.format_type == 'I':
-            # I格式
-            byte1 = (self.send_seq << 1) & 0xFE  # LSB=0
-            byte2 = (self.send_seq >> 7) & 0xFE
-            byte3 = (self.recv_seq << 1) & 0xFE
-            byte4 = (self.recv_seq >> 7) & 0xFE
+            # I格式 - IEC 104 序号编码
+            # byte1: N(S)低7位左移1位，bit0=0
+            # byte2: N(S)高8位
+            byte1 = (self.send_seq << 1) & 0xFF
+            byte2 = (self.send_seq >> 7) & 0xFF
+            byte3 = (self.recv_seq << 1) & 0xFF
+            byte4 = (self.recv_seq >> 7) & 0xFF
             return bytes([byte1, byte2, byte3, byte4])
         
         elif self.format_type == 'S':
-            # S格式
-            byte3 = (self.recv_seq << 1) & 0xFE
-            byte4 = (self.recv_seq >> 7) & 0xFE
+            # S格式 - IEC 104 序号编码
+            byte3 = (self.recv_seq << 1) & 0xFF
+            byte4 = (self.recv_seq >> 7) & 0xFF
             return bytes([0x01, 0x00, byte3, byte4])
         
         else:
