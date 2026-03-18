@@ -12,19 +12,19 @@ bool Asdu::parse(const QByteArray& data) {
 }
 
 bool Asdu::parse(const uint8_t* data, size_t len) {
-    if (len < 6) {
+    if (len < 5) {
         return false;
     }
 
     // 解析数据单元标识符
     m_header.ti = data[0];
     m_header.vsq = data[1];
-    m_header.cot = data[2] | (data[3] << 8);
-    m_header.addr = data[4] | (data[5] << 8);
+    m_header.cot = data[2];
+    m_header.addr = data[3] | (data[4] << 8);
 
     // 解析信息体
-    if (len > 6) {
-        m_infoObjects = QByteArray(reinterpret_cast<const char*>(data + 6), len - 6);
+    if (len > 5) {
+        m_infoObjects = QByteArray(reinterpret_cast<const char*>(data + 5), len - 5);
     }
 
     return true;
@@ -34,8 +34,7 @@ QByteArray Asdu::encode() const {
     QByteArray result;
     result.append(static_cast<char>(m_header.ti));
     result.append(static_cast<char>(m_header.vsq));
-    result.append(static_cast<char>(m_header.cot & 0xFF));
-    result.append(static_cast<char>((m_header.cot >> 8) & 0xFF));
+    result.append(static_cast<char>(m_header.cot));
     result.append(static_cast<char>(m_header.addr & 0xFF));
     result.append(static_cast<char>((m_header.addr >> 8) & 0xFF));
     result.append(m_infoObjects);

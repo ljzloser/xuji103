@@ -259,7 +259,7 @@ Asdu Asdu10Builder::build(uint16_t deviceAddr, uint8_t inf, const GenericDataStr
     Asdu asdu;
     asdu.setTi(10);
     asdu.setVsq(false, 1);
-    asdu.setCot(static_cast<uint16_t>(COT::GenReadValid));
+    asdu.setCot(static_cast<uint8_t>(COT::GenReadValid));
     asdu.setAddr(deviceAddr);
 
     QByteArray info;
@@ -313,28 +313,20 @@ bool Asdu21Parser::parse(const Asdu& asdu) {
     m_data.ngd = data[offset] & 0x3F;
     m_data.cont = (data[offset++] & 0x80) != 0;
 
+    // 解析请求数据项（ASDU21只包含GIN + KOD，不包含GDD + GID）
     for (uint8_t i = 0; i < m_data.ngd && offset < len; ++i) {
         GenericDataItem item;
 
+        // GIN (2字节)
         if (offset + 2 > len) break;
         item.gin.group = data[offset++];
         item.gin.entry = data[offset++];
 
+        // KOD (1字节)
         if (offset >= len) break;
         item.kod = data[offset++];
 
-        if (offset + 3 > len) break;
-        item.gdd.dataType = data[offset++];
-        item.gdd.dataSize = data[offset++];
-        item.gdd.number = data[offset] & 0x7F;
-        item.gdd.cont = (data[offset++] & 0x80) != 0;
-
-        uint16_t gidLen = item.gdd.totalSize();
-        if (offset + gidLen <= len) {
-            item.gid.resize(gidLen);
-            memcpy(item.gid.data(), data + offset, gidLen);
-            offset += gidLen;
-        }
+        // 注意：ASDU21不包含GDD和GID，只解析到KOD
 
         m_data.items.push_back(item);
     }
@@ -344,34 +336,62 @@ bool Asdu21Parser::parse(const Asdu& asdu) {
 
 // ========== Asdu21Builder 实现 ==========
 
+
+
 Asdu Asdu21Builder::build(uint16_t deviceAddr, uint8_t inf, const GenericDataStruct& data) {
+
     Asdu asdu;
+
     asdu.setTi(21);
+
     asdu.setVsq(false, 1);
-    asdu.setCot(static_cast<uint16_t>(COT::GenReadValid));
+
+    asdu.setCot(static_cast<uint8_t>(COT::GenReadValid));
+
     asdu.setAddr(deviceAddr);
 
+
+
     QByteArray info;
+
     info.append(static_cast<char>(FUN::Generic));
+
     info.append(static_cast<char>(inf));
+
     info.append(static_cast<char>(data.rii));
 
+
+
     uint8_t ngd = (data.cont ? 0x80 : 0x00) | (data.ngd & 0x3F);
+
     info.append(static_cast<char>(ngd));
 
+
+
+    // ASDU21（读命令）只包含 GIN + KOD，不包含 GDD + GID
+
     for (const auto& item : data.items) {
+
+        // GIN (组号 + 条目号)
+
         info.append(static_cast<char>(item.gin.group));
+
         info.append(static_cast<char>(item.gin.entry));
+
+        // KOD (描述类别)
+
         info.append(static_cast<char>(item.kod));
-        info.append(static_cast<char>(item.gdd.dataType));
-        info.append(static_cast<char>(item.gdd.dataSize));
-        uint8_t gdd3 = (item.gdd.cont ? 0x80 : 0x00) | (item.gdd.number & 0x7F);
-        info.append(static_cast<char>(gdd3));
-        info.append(reinterpret_cast<const char*>(item.gid.data()), static_cast<int>(item.gid.size()));
+
+        // 注意：ASDU21不包含GDD和GID！
+
     }
 
+
+
     asdu.infoObjects() = info;
+
     return asdu;
+
 }
 
 Asdu Asdu21Builder::buildReadGroup(uint16_t deviceAddr, uint8_t group, KOD kod) {

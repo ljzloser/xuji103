@@ -9,12 +9,12 @@
 
 namespace IEC103 {
 
-// ASDU数据单元标识符 (4字节)
+// ASDU数据单元标识符 (5字节)
 #pragma pack(push, 1)
 struct AsduHeader {
     uint8_t ti;       // 类型标识
     uint8_t vsq;      // 可变结构限定词
-    uint16_t cot;     // 传送原因 (2字节: 低字节COT, 高字节PN+T)
+    uint8_t cot;      // 传送原因 (1字节, 与标准103一致)
     uint16_t addr;    // ASDU公共地址 (2字节, 南网扩展)
     // 高字节: 设备地址 (0x00=子站, 0x01-0xFE=装置编号, 0xFF=广播)
     // 低字节: D7-D3=定值区号, D2-D0=CPU号
@@ -56,26 +56,10 @@ struct AsduHeader {
 
     // 获取信息对象数目
     uint8_t count() const { return vsq & 0x7F; }
-
-    // 获取传送原因
-    uint8_t cotValue() const { return cot & 0x3F; }
-
-    // 获取PN位 (肯定/否定)
-    bool pn() const { return (cot & 0x4000) != 0; }
-
-    // 获取T位 (测试)
-    bool test() const { return (cot & 0x8000) != 0; }
-
-    // 设置传送原因
-    void setCot(uint8_t value, bool pn = false, bool test = false) {
-        cot = value;
-        if (pn) cot |= 0x4000;
-        if (test) cot |= 0x8000;
-    }
 };
 #pragma pack(pop)
 
-static_assert(sizeof(AsduHeader) == 6, "AsduHeader must be 6 bytes");
+static_assert(sizeof(AsduHeader) == 5, "AsduHeader must be 5 bytes");
 
 // ASDU完整结构
 class Asdu {
@@ -105,8 +89,8 @@ public:
     uint8_t vsq() const { return m_header.vsq; }
     void setVsq(uint8_t vsq) { m_header.vsq = vsq; }
 
-    uint16_t cot() const { return m_header.cot; }
-    void setCot(uint16_t cot) { m_header.cot = cot; }
+    uint8_t cot() const { return m_header.cot; }
+    void setCot(uint8_t cot) { m_header.cot = cot; }
 
     uint16_t addr() const { return m_header.addr; }
     void setAddr(uint16_t addr) { m_header.addr = addr; }
@@ -123,7 +107,7 @@ public:
     TI tiEnum() const { return static_cast<TI>(m_header.ti); }
 
     // 获取传送原因枚举
-    COT cotEnum() const { return static_cast<COT>(m_header.cotValue()); }
+    COT cotEnum() const { return static_cast<COT>(m_header.cot); }
 
     // 是否有效
     bool isValid() const;

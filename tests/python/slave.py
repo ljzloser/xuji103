@@ -392,7 +392,7 @@ class MultiDeviceSlave:
         
         asdu_addr = self.build_asdu_addr(1, 0)
         oversized_data = b'\x00' * 3000
-        asdu = ASDU(0x01, 1, 1, 0, asdu_addr, oversized_data)
+        asdu = ASDU(0x01, 1, 1, asdu_addr, oversized_data)
         
         frame_data = bytearray()
         frame_data.append(0x68)
@@ -792,7 +792,7 @@ class MultiDeviceSlave:
         data.extend(CP56Time2a.now().encode())  # 接收时间
         data.append(0x89)  # SIN (A相接地故障)
 
-        asdu = ASDU(TI.DOUBLE_POINT_TIME, 1, COT.SPONTANEOUS, 0, asdu_addr, bytes(data))
+        asdu = ASDU(TI.DOUBLE_POINT_TIME, 1, COT.SPONTANEOUS, asdu_addr, bytes(data))
         frame = self.build_i_frame(asdu)
         writer.write(frame)
         await writer.drain()

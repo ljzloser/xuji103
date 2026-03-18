@@ -160,8 +160,7 @@ class ASDU:
     """ASDU数据单元"""
     ti: int                      # 类型标识
     vsq: int = 1                 # 可变结构限定词
-    cot: int = 1                 # 传输原因
-    pn: int = 0                  # P/N位 (0=肯定, 1=否定)
+    cot: int = 1                 # 传输原因 (1字节, 与标准103一致)
     asdu_addr: int = 0           # ASDU地址 (2字节, 南网规范: 高字节=设备地址)
     data: bytes = b''            # 信息体数据
     
@@ -172,9 +171,8 @@ class ASDU:
         result.append(self.ti)
         # VSQ
         result.append(self.vsq)
-        # COT (2字节: 低字节=COT, 高字节=P/N位)
+        # COT (1字节, 与标准103一致)
         result.append(self.cot & 0xFF)
-        result.append(self.pn & 0x01)
         # ASDU地址 (2字节, 小端, 南网规范)
         result.extend(struct.pack('<H', self.asdu_addr))
         # 信息体
@@ -184,17 +182,16 @@ class ASDU:
     @staticmethod
     def parse(data: bytes) -> 'ASDU':
         """解析ASDU"""
-        if len(data) < 6:
+        if len(data) < 5:
             raise ValueError("ASDU数据太短")
         
         ti = data[0]
         vsq = data[1]
         cot = data[2]
-        pn = data[3] & 0x01
-        asdu_addr = struct.unpack('<H', data[4:6])[0]
-        info_data = data[6:]
+        asdu_addr = struct.unpack('<H', data[3:5])[0]
+        info_data = data[5:]
         
-        return ASDU(ti, vsq, cot, pn, asdu_addr, info_data)
+        return ASDU(ti, vsq, cot, asdu_addr, info_data)
 
 
 @dataclass
@@ -307,7 +304,7 @@ class ASDUBuilder:
             INF.GI_START,  # INF = 0
             scn         # SCN = 扫描序号
         ])
-        return ASDU(TI.GI_CMD, 1, COT.GI, 0, asdu_addr, data)
+        return ASDU(TI.GI_CMD, 1, COT.GI, asdu_addr, data)
     
     @staticmethod
     def build_gi_cmd(device_addr: int, scn: int = 1) -> ASDU:
@@ -318,7 +315,7 @@ class ASDUBuilder:
             INF.GI_START,  # INF
             scn         # SCN
         ])
-        return ASDU(TI.GI_CMD, 1, COT.GI, 0, asdu_addr, data)
+        return ASDU(TI.GI_CMD, 1, COT.GI, asdu_addr, data)
     
     @staticmethod
     def build_gi_end(device_addr: int, scn: int = 0) -> ASDU:
@@ -329,7 +326,7 @@ class ASDUBuilder:
             INF.GI_START,  # INF
             scn         # SCN
         ])
-        return ASDU(TI.GI_END, 1, COT.GI_TERMINATE, 0, asdu_addr, data)
+        return ASDU(TI.GI_END, 1, COT.GI_TERMINATE, asdu_addr, data)
     
     @staticmethod
     def build_read_group(asdu_addr: int, group: int, kod: int = KOD.ACTUAL_VALUE) -> ASDU:
@@ -342,7 +339,7 @@ class ASDUBuilder:
         data.append(group)  # GIN group
         data.append(0xFF)  # GIN entry (0xFF表示组标题)
         data.append(kod)  # KOD
-        return ASDU(TI.GENERIC_READ, 1, COT.GENERIC_DATA_RESP, 0, asdu_addr, bytes(data))
+        return ASDU(TI.GENERIC_READ, 1, COT.GENERIC_DATA_RESP, asdu_addr, bytes(data))
     
     @staticmethod
     def build_double_point(device_addr: int, points: List[Tuple[int, int, int]], 
@@ -358,7 +355,7 @@ class ASDUBuilder:
             data.append(inf)
             data.append(dpi & 0x03)  # DPI: 00/01/10/11
         data.append(scn)  # SIN = SCN
-        return ASDU(TI.DOUBLE_POINT, len(points), cot, 0, asdu_addr, bytes(data))
+        return ASDU(TI.DOUBLE_POINT, len(points), cot, asdu_addr, bytes(data))
     
     @staticmethod
     def build_generic_data(asdu_addr: int, rii: int, items: List[GenericDataItem],
@@ -381,7 +378,7 @@ class ASDUBuilder:
         for item in items:
             data.extend(item.encode())
         
-        return ASDU(TI.GENERIC_DATA, 1, cot, 0, asdu_addr, bytes(data))
+        return ASDU(TI.GENERIC_DATA, 1, cot, asdu_addr, bytes(data))
     
     @staticmethod
     def build_single_point(device_addr: int, fun: int, inf: int, dpi: int,
@@ -408,7 +405,7 @@ class ASDUBuilder:
         # SIN
         data.append(0)
         
-        return ASDU(TI.SINGLE_POINT, 1, cot, 0, asdu_addr, bytes(data))
+        return ASDU(TI.SINGLE_POINT, 1, cot, asdu_addr, bytes(data))
     
     @staticmethod
     def build_catalog_data(asdu_addr: int, rii: int, gin_group: int, gin_entry: int,
@@ -440,7 +437,7 @@ class ASDUBuilder:
             data.append(1)  # GDD.Number
             data.extend(gid)  # GID
         
-        return ASDU(TI.GENERIC_IDENT, 1, cot, 0, asdu_addr, bytes(data))
+        return ASDU(TI.GENERIC_IDENT, 1, cot, asdu_addr, bytes(data))
     
     @staticmethod
     def build_generic_data_with_time(asdu_addr: int, rii: int, 
@@ -513,4 +510,4 @@ class ASDUBuilder:
         # 子站接收时间 CP56Time2a (7字节) - 偏移15-21
         data.extend(CP56Time2a.now().encode())
         
-        return ASDU(TI.GENERIC_DATA, 1, cot, 0, asdu_addr, bytes(data))
+        return ASDU(TI.GENERIC_DATA, 1, cot, asdu_addr, bytes(data))

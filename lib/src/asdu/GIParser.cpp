@@ -10,7 +10,7 @@ Asdu Asdu7Builder::build(uint16_t deviceAddr, uint8_t scn) {
     Asdu asdu;
     asdu.setTi(7);
     asdu.setVsq(false, 1);
-    asdu.setCot(static_cast<uint16_t>(COT::GeneralInterrogation));
+    asdu.setCot(static_cast<uint8_t>(COT::GeneralInterrogation));
     asdu.setAddr(deviceAddr);
 
     QByteArray info;
@@ -54,7 +54,7 @@ Asdu Asdu8Builder::build(uint16_t deviceAddr, uint8_t scn) {
     Asdu asdu;
     asdu.setTi(8);
     asdu.setVsq(false, 1);
-    asdu.setCot(static_cast<uint16_t>(COT::GITermination));
+    asdu.setCot(static_cast<uint8_t>(COT::GITermination));
     asdu.setAddr(deviceAddr);
 
     QByteArray info;
@@ -124,7 +124,7 @@ Asdu Asdu42Builder::build(uint16_t asduAddr, uint8_t scn,
     Asdu asdu;
     asdu.setTi(42);
     asdu.setVsq(false, static_cast<uint8_t>(objects.size()));
-    asdu.setCot(static_cast<uint16_t>(COT::GeneralInterrogation));
+    asdu.setCot(static_cast<uint8_t>(COT::GeneralInterrogation));
     asdu.setAddr(asduAddr);
 
     QByteArray info;

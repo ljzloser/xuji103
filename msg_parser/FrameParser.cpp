@@ -283,8 +283,12 @@ FrameInfo FrameParser::parseFrame(const QByteArray& data,
         uint16_t recvSeq = ((uint8_t)data[5] >> 1) | (((uint8_t)data[6] & 0xFE) << 7);
 
         FieldInfo apci("APCI (I格式)", "", apciStart, 7);
-        apci.children.append(FieldInfo("控制域[0]", QString("N(S)=%1").arg(sendSeq), 3, 5));
-        apci.children.append(FieldInfo("控制域[1]", QString("N(R)=%1").arg(recvSeq), 5, 7));
+        apci.children.append(FieldInfo("控制域[0]", QString("%1").arg((uint8_t)data[3], 2, 16, QChar('0')), 3, 4));
+        apci.children.append(FieldInfo("控制域[1]", QString("%1").arg((uint8_t)data[4], 2, 16, QChar('0')), 4, 5));
+        apci.children.append(FieldInfo("控制域[2]", QString("%1").arg((uint8_t)data[5], 2, 16, QChar('0')), 5, 6));
+        apci.children.append(FieldInfo("控制域[3]", QString("%1").arg((uint8_t)data[6], 2, 16, QChar('0')), 6, 7));
+        apci.children.append(FieldInfo("N(S)", QString::number(sendSeq), 3, 5));
+        apci.children.append(FieldInfo("N(R)", QString::number(recvSeq), 5, 7));
         frame.fields.append(apci);
 
         // 使用lib解析ASDU
@@ -302,25 +306,19 @@ FrameInfo FrameParser::parseFrame(const QByteArray& data,
                     QString("%1 (SQ=%2, 数目=%3)").arg(asdu.vsq(), 2, 16, QChar('0'))
                         .arg(asdu.sq() ? "1" : "0").arg(asdu.count()), 
                     asduStart + 1, asduStart + 2));
-                uint8_t cotVal = asdu.cot() & 0x3F;
+                uint8_t cotVal = asdu.cot();
                 asduField.children.append(FieldInfo("传输原因COT", 
                     QString("%1 (%2)").arg(cotVal).arg(cotName(cotVal)), 
                     asduStart + 2, asduStart + 3));
-                asduField.children.append(FieldInfo("P/N/Test/OA", 
-                    QString("PN=%1 Test=%2 OA=%3")
-                        .arg((asdu.cot() & 0x4000) ? 1 : 0)
-                        .arg((asdu.cot() & 0x8000) ? 1 : 0)
-                        .arg((asdu.cot() >> 8) & 0x3F), 
-                    asduStart + 3, asduStart + 4));
                 asduField.children.append(FieldInfo("ASDU地址", 
                     QString("%1 (设备=%2 CPU=%3)")
                         .arg(asdu.addr())
                         .arg((asdu.addr() >> 8) & 0xFF)
                         .arg(asdu.addr() & 0x07), 
-                    asduStart + 4, asduStart + 6));
+                    asduStart + 3, asduStart + 5));
 
                 // 解析信息对象
-                parseInfoObject(asdu.infoObjects(), asduStart + 6, asdu.ti(), asdu.vsq(), asduField.children);
+                parseInfoObject(asdu.infoObjects(), asduStart + 5, asdu.ti(), asdu.vsq(), asduField.children);
 
                 frame.fields.append(asduField);
             }
@@ -332,8 +330,11 @@ FrameInfo FrameParser::parseFrame(const QByteArray& data,
         uint16_t recvSeq = ((uint8_t)data[5] >> 1) | (((uint8_t)data[6] & 0xFE) << 7);
 
         FieldInfo apci("APCI (S格式)", "", apciStart, 7);
-        apci.children.append(FieldInfo("控制域[0]", "01 00 (S格式标识)", 3, 5));
-        apci.children.append(FieldInfo("控制域[1]", QString("N(R)=%1").arg(recvSeq), 5, 7));
+        apci.children.append(FieldInfo("控制域[0]", "01 (S格式标识)", 3, 4));
+        apci.children.append(FieldInfo("控制域[1]", "00 (保留)", 4, 5));
+        apci.children.append(FieldInfo("控制域[2]", QString("%1").arg((uint8_t)data[5], 2, 16, QChar('0')), 5, 6));
+        apci.children.append(FieldInfo("控制域[3]", QString("%1").arg((uint8_t)data[6], 2, 16, QChar('0')), 6, 7));
+        apci.children.append(FieldInfo("N(R)", QString::number(recvSeq), 5, 7));
         frame.fields.append(apci);
     }
     else if ((byte1 & 0x03) == 0x03) {  // U帧
@@ -342,9 +343,11 @@ FrameInfo FrameParser::parseFrame(const QByteArray& data,
         QString uName = uFormatName(byte1);
 
         FieldInfo apci("APCI (U格式)", "", apciStart, 7);
-        apci.children.append(FieldInfo("控制域", 
+        apci.children.append(FieldInfo("控制域[0]", 
             QString("%1 (%2)").arg(byte1, 2, 16, QChar('0')).arg(uName), 3, 4));
-        apci.children.append(FieldInfo("保留", "00 00 00", 4, 7));
+        apci.children.append(FieldInfo("控制域[1]", "00 (保留)", 4, 5));
+        apci.children.append(FieldInfo("控制域[2]", "00 (保留)", 5, 6));
+        apci.children.append(FieldInfo("控制域[3]", "00 (保留)", 6, 7));
         frame.fields.append(apci);
     }
     else {
@@ -627,28 +630,21 @@ void FrameParser::parseInfoObject(const QByteArray& infoData, int infoStart,
             info.children.append(FieldInfo("NGD", QString("数目=%1 CONT=%2").arg(gdata.ngd).arg(gdata.cont ? 1 : 0), 
                 infoStart + 3, infoStart + 4));
 
-            // 解析数据项
+            // 解析数据项 (ASDU21只包含GIN + KOD，不包含GDD + GID)
             int offset = 4;
             for (size_t i = 0; i < gdata.items.size(); ++i) {
                 const auto& item = gdata.items[i];
                 int itemStart = infoStart + offset;
-                int gidLen = item.gdd.totalSize();
 
-                FieldInfo itemField(QString("请求项[%1]").arg(i + 1), "", itemStart, itemStart + 6 + gidLen);
+                FieldInfo itemField(QString("请求项[%1]").arg(i + 1), "", itemStart, itemStart + 3);
                 itemField.children.append(FieldInfo("GIN组号", QString::number(item.gin.group), itemStart, itemStart + 1));
                 itemField.children.append(FieldInfo("GIN条目", QString::number(item.gin.entry), itemStart + 1, itemStart + 2));
                 itemField.children.append(FieldInfo("KOD", 
                     QString("%1 (%2)").arg(item.kod, 2, 16, QChar('0')).arg(kodName(item.kod)), 
                     itemStart + 2, itemStart + 3));
-                itemField.children.append(FieldInfo("GDD类型", QString::number(item.gdd.dataType), 
-                    itemStart + 3, itemStart + 4));
-                itemField.children.append(FieldInfo("GDD长度", QString::number(item.gdd.dataSize), 
-                    itemStart + 4, itemStart + 5));
-                itemField.children.append(FieldInfo("GDD数目", QString::number(item.gdd.number), 
-                    itemStart + 5, itemStart + 6));
 
                 info.children.append(itemField);
-                offset += 6 + gidLen;
+                offset += 3;  // ASDU21每项只有3字节: GIN(2) + KOD(1)
             }
         }
     }
